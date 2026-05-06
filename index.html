@@ -123,6 +123,35 @@
         <div class="stocks-grid" id="cryptosGrid"></div>
       </div>
 
+      <!-- ---- PERFORMANCE HEATMAP SUBSECTION ---- -->
+      <div class="subsection" style="margin-top: 3.5rem;">
+        <h3 class="subsection-title">Performance Heatmap</h3>
+        <p class="subsection-desc">
+          Multi-period percentage returns for all tracked stocks and cryptos — 1D, 1W, YTD, 1Y, and 5Y.
+          Cell color intensity reflects the magnitude of the move. Loads on demand to conserve API calls.
+        </p>
+
+        <div class="heatmap-controls">
+          <button class="btn-refresh" id="heatmapLoadBtn">&#9654;&nbsp;Load Heatmap</button>
+          <span class="heatmap-status" id="heatmapStatus"></span>
+        </div>
+
+        <div id="heatmapWrapper" style="display:none;">
+          <div class="heatmap-legend">
+            <span class="hl-label">Scale:</span>
+            <span class="hl-item hl-sn2">&lt;&minus;20%</span>
+            <span class="hl-item hl-sn1">&minus;20% &rarr; &minus;5%</span>
+            <span class="hl-item hl-s0">&minus;5% &rarr; 0%</span>
+            <span class="hl-item hl-sp0">0% &rarr; +5%</span>
+            <span class="hl-item hl-sp1">+5% &rarr; +20%</span>
+            <span class="hl-item hl-sp2">&gt;+20%</span>
+          </div>
+          <div class="heatmap-scroll">
+            <table class="heatmap-table" id="heatmapTable"></table>
+          </div>
+        </div>
+      </div>
+
     </div>
   </section>
 

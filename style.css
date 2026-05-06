@@ -563,6 +563,139 @@ h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif; }
 }
 
 /* ============================================================
+   PERFORMANCE HEATMAP
+   ============================================================ */
+.heatmap-controls {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.heatmap-status {
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* Color-swatch legend */
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.hl-label {
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-right: 0.2rem;
+}
+
+.hl-item {
+  padding: 0.18rem 0.6rem;
+  border-radius: 4px;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+.hl-sn2 { background: rgba(220, 30, 30, 0.80); }
+.hl-sn1 { background: rgba(160, 25, 25, 0.65); }
+.hl-s0  { background: rgba(100, 15, 15, 0.45); }
+.hl-sp0 { background: rgba(0,  85, 42, 0.45); }
+.hl-sp1 { background: rgba(0, 145, 72, 0.65); }
+.hl-sp2 { background: rgba(0, 210, 105, 0.80); }
+
+/* Scrollable table wrapper */
+.heatmap-scroll {
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+.heatmap-table {
+  width: 100%;
+  min-width: 580px;
+  border-collapse: collapse;
+  background: var(--bg-card);
+}
+
+.heatmap-table thead th {
+  padding: 0.7rem 0.9rem;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.heatmap-table thead th:first-child,
+.heatmap-table thead th:nth-child(2) { text-align: left; }
+
+.heatmap-table tbody tr:hover { background: var(--bg-card-hover); }
+
+/* Section divider row (Stocks / Cryptos) */
+.heatmap-table tbody tr.hm-divider td {
+  padding: 0.38rem 0.9rem;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  background: rgba(0, 212, 255, 0.05);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.hm-ticker {
+  padding: 0.65rem 0.9rem;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.hm-name {
+  padding: 0.65rem 0.9rem;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.hm-cell {
+  padding: 0.65rem 0.7rem;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  min-width: 76px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  transition: filter 0.15s ease;
+  color: #fff;
+}
+
+.hm-cell:hover { filter: brightness(1.25); }
+
+.hm-na {
+  color: var(--text-muted) !important;
+  font-size: 0.73rem;
+}
+
+/* ============================================================
    CONTACT SECTION
    ============================================================ */
 .contact-grid {
