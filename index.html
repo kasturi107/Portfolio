@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kasturi — Quantum Physicist</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+
+  <!-- ========== NAVIGATION ========== -->
+  <nav class="navbar" id="navbar">
+    <div class="nav-container">
+      <a href="#home" class="nav-logo">Kasturi</a>
+      <ul class="nav-links" id="navLinks">
+        <li><a href="#home"     class="nav-link active">Home</a></li>
+        <li><a href="#about"    class="nav-link">About</a></li>
+        <li><a href="#projects" class="nav-link">Projects</a></li>
+        <li><a href="#contact"  class="nav-link">Contact</a></li>
+      </ul>
+      <button class="hamburger" id="hamburger" aria-label="Toggle menu">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ========== HOME / HERO SECTION ========== -->
+  <section id="home" class="hero">
+    <canvas id="particleCanvas"></canvas>
+    <div class="hero-content">
+      <!-- Profile photo placeholder — uncomment and update src when ready -->
+      <!-- <div class="hero-photo">
+        <img src="your-photo.jpg" alt="Kasturi" />
+      </div> -->
+      <p class="hero-greeting">Hello, I'm</p>
+      <h1 class="hero-name">Kasturi</h1>
+      <h2 class="hero-title">PhD Researcher in Quantum Physics &amp; Quantum Computing</h2>
+      <p class="hero-tagline">University of Luxembourg &nbsp;·&nbsp; Exploring the intersection of quantum science and financial markets</p>
+      <a href="#projects" class="btn-primary">View My Work</a>
+    </div>
+    <div class="scroll-indicator">
+      <div class="scroll-dot"></div>
+    </div>
+  </section>
+
+  <!-- ========== ABOUT SECTION ========== -->
+  <section id="about" class="section fade-in-section">
+    <div class="container">
+      <h2 class="section-title">About Me</h2>
+      <div class="about-grid">
+
+        <!-- Left: profile photo placeholder -->
+        <div class="about-photo-wrapper">
+          <!-- Profile photo goes here — replace the placeholder div below with:
+               <img src="your-photo.jpg" alt="Kasturi" class="profile-photo" /> -->
+          <div class="photo-placeholder">K</div>
+        </div>
+
+        <!-- Right: bio text -->
+        <div class="about-text">
+          <p>
+            I am a PhD student in Quantum Physics and Quantum Computing at the
+            <span class="accent">University of Luxembourg</span>, where I began
+            my doctoral journey in <span class="accent">September 2023</span>.
+          </p>
+          <p>
+            My research lies at the frontier of many-body physics and quantum
+            information. Beyond the lab, I am deeply interested in stock market
+            analysis — bringing the same analytical rigor from quantum mechanics
+            to understanding financial markets.
+          </p>
+          <div class="tags">
+            <span class="tag">Quantum Computing</span>
+            <span class="tag">Many-Body Physics</span>
+            <span class="tag">Stock Market Analysis</span>
+            <span class="tag">Data Analysis</span>
+            <span class="tag">Python</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== PROJECTS SECTION ========== -->
+  <section id="projects" class="section fade-in-section">
+    <div class="container">
+      <h2 class="section-title">Projects</h2>
+      <p class="section-intro">A collection of my work spanning quantum research and financial data analysis.</p>
+
+      <!-- ---- LIVE STOCK TRACKER SUBSECTION ---- -->
+      <div class="subsection">
+        <h3 class="subsection-title">Live Stock Tracker</h3>
+        <p class="subsection-desc">
+          Real-time price tracking for my selected stocks, powered by the Finnhub API.
+          Data refreshes automatically every 5 minutes.
+        </p>
+
+        <!-- Controls: refresh button + countdown timer -->
+        <div class="tracker-controls">
+          <button class="btn-refresh" id="refreshBtn">&#8635; Refresh Now</button>
+          <span class="countdown">Next refresh in: <span id="countdownTimer">5:00</span></span>
+        </div>
+
+        <!-- Stock cards are injected here by script.js -->
+        <div class="stocks-grid" id="stocksGrid"></div>
+      </div>
+
+      <!-- ---- CRYPTO TRACKER SUBSECTION ---- -->
+      <div class="subsection" style="margin-top: 3.5rem;">
+        <h3 class="subsection-title">Live Crypto Tracker</h3>
+        <p class="subsection-desc">
+          Real-time pricing for selected cryptocurrencies, powered by the Finnhub API.
+          % change is daily — from yesterday's close to the current price.
+        </p>
+
+        <!-- Crypto cards are injected here by script.js -->
+        <div class="stocks-grid" id="cryptosGrid"></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ========== CONTACT SECTION ========== -->
+  <section id="contact" class="section fade-in-section">
+    <div class="container">
+      <h2 class="section-title">Get In Touch</h2>
+      <p class="section-intro">
+        Whether it's about quantum physics, research collaborations,
+        or market discussions — feel free to reach out.
+      </p>
+
+      <div class="contact-grid">
+
+        <!-- Contact info links -->
+        <div class="contact-info">
+          <div class="contact-item">
+            <span class="contact-icon">&#9993;</span>
+            <!-- Update your email address below -->
+            <a href="mailto:kasturi.swain@uni.lu" class="contact-link">kasturi.swain@uni.lu</a>
+          </div>
+          <div class="contact-item">
+            <span class="contact-icon">&#9670;</span>
+            <a href="https://kasturi107.github.io" target="_blank" rel="noopener" class="contact-link">kasturi107.github.io</a>
+          </div>
+          <div class="contact-item">
+            <span class="contact-icon">in</span>
+            <!-- Update your LinkedIn URL below -->
+            <a href="#" class="contact-link">LinkedIn (add your URL)</a>
+          </div>
+        </div>
+
+        <!-- Contact form -->
+        <!-- To make this form actually send emails:
+             1. Go to https://formspree.io and create a free account
+             2. Create a new form and copy your form ID
+             3. Replace action="#" below with action="https://formspree.io/f/YOUR_FORM_ID"
+             4. Remove the onsubmit attribute -->
+        <form class="contact-form" id="contactForm">
+          <div class="form-group">
+            <input type="text"  name="name"    placeholder="Your Name"    required class="form-input" />
+          </div>
+          <div class="form-group">
+            <input type="email" name="email"   placeholder="Your Email"   required class="form-input" />
+          </div>
+          <div class="form-group">
+            <textarea           name="message" placeholder="Your Message" required class="form-input" rows="5"></textarea>
+          </div>
+          <button type="submit" class="btn-primary">Send Message</button>
+        </form>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <p>&copy; 2026 Kasturi &nbsp;·&nbsp; Built with HTML, CSS &amp; JavaScript</p>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
