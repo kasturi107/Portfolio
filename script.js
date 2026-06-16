@@ -39,8 +39,9 @@ const CRYPTOS = [
 
 const REFRESH_SECONDS = 5 * 60; // auto-refresh every 5 minutes
 
-// Stores the 1D % change from the live quote fetch so the heatmap can reuse it
+// Populated by the quote fetch so the heatmap can reuse live 1D data and prices
 const dailyChanges = {};
+const liveQuotes   = {};
 
 /* ============================================================
    NAVIGATION — scroll effect, hamburger, active link
@@ -237,7 +238,8 @@ async function fetchAllStocks() {
   for (const stock of STOCKS) {
     try {
       const data = await fetchQuote(stock.ticker);
-      dailyChanges[stock.ticker] = data.dp;
+      dailyChanges[stock.ticker]  = data.dp;
+      liveQuotes[stock.ticker]    = data.c;
       results.push({
         ...stock,
         price:   data.c,
@@ -299,6 +301,7 @@ async function loadAndRenderCryptos() {
     try {
       const data = await fetchQuote(crypto.symbol);
       dailyChanges[crypto.ticker] = data.dp;
+      liveQuotes[crypto.ticker]   = data.c;
       results.push({ ...crypto, price: data.c, change: data.dp, ok: true });
     } catch {
       results.push({ ...crypto, price: null, change: null, ok: false });
@@ -370,26 +373,33 @@ refreshBtn.addEventListener('click', () => {
 fetchAllStocks();
 
 /* ============================================================
-   PERFORMANCE HEATMAP
+   PERFORMANCE HEATMAP — TREEMAP
    ============================================================ */
-const HEATMAP_PERIODS = ['1D', '1W', 'YTD', '1Y', '5Y'];
 
-// Returns a background color string reflecting the % magnitude
-function heatColor(pct) {
-  if (pct === null || pct === undefined || isNaN(pct)) return null;
-  const t = Math.min(Math.abs(pct) / 40, 1); // saturate at ±40 %
-  const a = (0.22 + t * 0.55).toFixed(2);
-  if (pct >= 0) {
-    const g = Math.round(80 + t * 155);
-    const b = Math.round(30 + t * 45);
-    return `rgba(0,${g},${b},${a})`;
-  } else {
-    const r = Math.round(90 + t * 145);
-    return `rgba(${r},14,14,${a})`;
-  }
+// Approximate relative market caps for cell sizing
+const MARKET_WEIGHTS = {
+  MSFT: 3100, NVDA: 2900, AMZN: 2200, GOOGL: 2000,
+  META: 1600, NFLX:  450, NVO:   380, UBER:   180,
+  MELI:  120, PYPL:   65, TTD:    40, LULU:    35,
+  PINS:   22, NBIS:   20, CRWV:   18, IREN:     3,
+  BTC:  1900, ETH:   400, SOL:    90, SUI:     15, AAVE: 4,
+};
+
+let heatmapLoadedData    = null;
+let currentHeatmapPeriod = '1D';
+
+// 6-bucket color scale — matches the legend:
+// < -20% | -20→-5% | -5→0% | 0→+5% | +5→+20% | > +20%
+function tmColor(pct) {
+  if (pct === null || pct === undefined || isNaN(pct)) return '#0f0f1e';
+  if (pct >  20) return '#09c463';  // > +20%  : vivid green
+  if (pct >   5) return '#098c46';  // +5→+20% : medium green
+  if (pct >   0) return '#0a5a2e';  // 0→+5%   : dark green
+  if (pct >  -5) return '#5c1212';  // 0→-5%   : dark red
+  if (pct > -20) return '#8c1818';  // -5→-20% : medium red
+  return '#c41e1e';                  // < -20%  : vivid red
 }
 
-// Find the closing price of the candle at or just before targetTs (Unix seconds)
 function priceAtTs(candles, targetTs) {
   let idx = -1;
   for (let i = 0; i < candles.t.length; i++) {
@@ -412,142 +422,158 @@ async function fetchCandles5Y(url) {
   return data;
 }
 
-function heatmapRow(item) {
-  const cells = HEATMAP_PERIODS.map(p => {
-    const pct = item.changes ? item.changes[p] : null;
-    if (pct === null || pct === undefined || isNaN(pct)) {
-      return `<td class="hm-cell hm-na">N/A</td>`;
+function renderTreemap(data, period) {
+  const container = document.getElementById('treemapContainer');
+  const width  = container.clientWidth;
+  const height = container.clientHeight;
+  if (!width || !height || !data.length) return;
+
+  const root = d3.hierarchy({ name: 'root', children: data })
+    .sum(d => d.weight || 1)
+    .sort((a, b) => b.value - a.value);
+
+  d3.treemap()
+    .size([width, height])
+    .padding(2)
+    .tile(d3.treemapSquarify.ratio(1.4))
+    (root);
+
+  container.innerHTML = '';
+
+  root.leaves().forEach(leaf => {
+    const d  = leaf.data;
+    const pct = d.changes ? d.changes[period] : null;
+    const w  = leaf.x1 - leaf.x0;
+    const h  = leaf.y1 - leaf.y0;
+
+    const cell = document.createElement('div');
+    cell.className = 'tm-cell';
+    cell.style.left       = leaf.x0 + 'px';
+    cell.style.top        = leaf.y0 + 'px';
+    cell.style.width      = w + 'px';
+    cell.style.height     = h + 'px';
+    cell.style.background = tmColor(pct);
+
+    if (w > 28 && h > 20) {
+      const tfs = Math.max(9, Math.min(w / (d.ticker.length * 0.62), h * 0.32, 30));
+      const ifs = Math.max(7,  tfs * 0.6);
+
+      let inner = `<div class="tm-ticker" style="font-size:${tfs.toFixed(1)}px">${d.ticker}</div>`;
+
+      if (w > 52 && h > 52 && d.price) {
+        inner += `<div class="tm-price" style="font-size:${ifs.toFixed(1)}px">${formatPrice(d.price)}</div>`;
+      }
+      if (h > 40 && w > 38 && pct !== null && !isNaN(pct)) {
+        const sign = pct >= 0 ? '+' : '';
+        inner += `<div class="tm-change" style="font-size:${ifs.toFixed(1)}px">${sign}${pct.toFixed(2)}%</div>`;
+      }
+      cell.innerHTML = inner;
     }
-    const bg   = heatColor(pct);
-    const sign = pct >= 0 ? '+' : '';
-    const style = bg ? ` style="background:${bg}"` : '';
-    return `<td class="hm-cell"${style}>${sign}${pct.toFixed(1)}%</td>`;
-  }).join('');
 
-  return `<tr>
-    <td class="hm-ticker">${item.ticker}</td>
-    <td class="hm-name">${item.name}</td>
-    ${cells}
-  </tr>`;
-}
-
-function renderHeatmap(results) {
-  const table = document.getElementById('heatmapTable');
-  const hdr   = HEATMAP_PERIODS.map(p => `<th>${p}</th>`).join('');
-  let html    = `<thead><tr><th>Ticker</th><th>Name</th>${hdr}</tr></thead><tbody>`;
-
-  const stocks  = results.filter(r => r.type === 'stock');
-  const cryptos = results.filter(r => r.type === 'crypto');
-  const cols    = 2 + HEATMAP_PERIODS.length;
-
-  stocks.forEach(item => { html += heatmapRow(item); });
-  html += `<tr class="hm-divider"><td colspan="${cols}">Cryptocurrencies</td></tr>`;
-  cryptos.forEach(item => { html += heatmapRow(item); });
-
-  html += '</tbody>';
-  table.innerHTML = html;
-}
-
-function renderHeatmapSkeleton() {
-  const table = document.getElementById('heatmapTable');
-  const hdr   = HEATMAP_PERIODS.map(p => `<th>${p}</th>`).join('');
-  const cols  = 2 + HEATMAP_PERIODS.length;
-  let html    = `<thead><tr><th>Ticker</th><th>Name</th>${hdr}</tr></thead><tbody>`;
-
-  const total = STOCKS.length + CRYPTOS.length;
-  for (let i = 0; i < total; i++) {
-    if (i === STOCKS.length) {
-      html += `<tr class="hm-divider"><td colspan="${cols}">Cryptocurrencies</td></tr>`;
-    }
-    const skel = HEATMAP_PERIODS.map(() =>
-      `<td class="hm-cell"><div class="skeleton" style="width:48px;height:0.8rem;margin:auto"></div></td>`
-    ).join('');
-    html += `<tr>
-      <td class="hm-ticker"><div class="skeleton" style="width:42px;height:0.86rem;display:inline-block"></div></td>
-      <td class="hm-name"><div class="skeleton" style="width:78px;height:0.76rem;display:inline-block"></div></td>
-      ${skel}
-    </tr>`;
-  }
-  html += '</tbody>';
-  table.innerHTML = html;
+    container.appendChild(cell);
+  });
 }
 
 async function loadHeatmap() {
-  const btn     = document.getElementById('heatmapLoadBtn');
-  const status  = document.getElementById('heatmapStatus');
-  const wrapper = document.getElementById('heatmapWrapper');
+  const btn       = document.getElementById('heatmapLoadBtn');
+  const status    = document.getElementById('heatmapStatus');
+  const tabs      = document.getElementById('periodTabs');
+  const container = document.getElementById('treemapContainer');
 
   btn.disabled    = true;
   btn.textContent = '↻ Loading…';
-  wrapper.style.display = 'block';
-  renderHeatmapSkeleton();
+  container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-family:\'Roboto Mono\',monospace;font-size:0.85rem;">Fetching data…</div>';
 
   const now    = Math.floor(Date.now() / 1000);
+  // Finnhub free tier supports ~1 year of daily candles.
+  // Use daily resolution with a 1Y window — reliable on the free tier.
+  const from1Y = now - 370 * 86400;   // 1 year + 5-day buffer
   const ts1W   = now - 7   * 86400;
   const tsYTD  = Math.floor(new Date(new Date().getFullYear(), 0, 1).getTime() / 1000);
   const ts1Y   = now - 365 * 86400;
   const ts5Y   = now - 5 * 365 * 86400;
 
-  const results   = [];
-  let processed   = 0;
-  const total     = STOCKS.length + CRYPTOS.length;
+  // Helper: fetch candles and compute all period changes.
+  // 1D always comes from the live quote stored in dailyChanges —
+  // that way it never becomes null even if the candle call fails.
+  async function buildChanges(url, ticker) {
+    const out = { '1D': dailyChanges[ticker] ?? null, '1W': null, 'YTD': null, '1Y': null, '5Y': null };
+    try {
+      const c    = await fetchCandles5Y(url);
+      const last = c.c[c.c.length - 1];
+      out['1W']  = pctDiff(priceAtTs(c, ts1W),  last);
+      out['YTD'] = pctDiff(priceAtTs(c, tsYTD), last);
+      out['1Y']  = pctDiff(priceAtTs(c, ts1Y),  last);
+      // Only populate 5Y if the dataset actually reaches back that far
+      if (c.t[0] <= ts5Y) out['5Y'] = pctDiff(priceAtTs(c, ts5Y), last);
+    } catch { /* candle unavailable — 1D still populated above */ }
+    return out;
+  }
+
+  const results  = [];
+  let processed  = 0;
+  const total    = STOCKS.length + CRYPTOS.length;
 
   for (const stock of STOCKS) {
     processed++;
-    status.textContent = `Fetching ${stock.ticker}… (${processed}/${total})`;
-    try {
-      const from = ts5Y - 30 * 86400; // a small buffer before 5 Y mark
-      const url  = `https://finnhub.io/api/v1/stock/candle?symbol=${stock.ticker}&resolution=W&from=${from}&to=${now}&token=${FINNHUB_API_KEY}`;
-      const c    = await fetchCandles5Y(url);
-      const last = c.c[c.c.length - 1];
-      results.push({
-        ...stock, type: 'stock', ok: true,
-        changes: {
-          '1D':  dailyChanges[stock.ticker] ?? null,
-          '1W':  pctDiff(priceAtTs(c, ts1W),  last),
-          'YTD': pctDiff(priceAtTs(c, tsYTD), last),
-          '1Y':  pctDiff(priceAtTs(c, ts1Y),  last),
-          '5Y':  pctDiff(priceAtTs(c, ts5Y),  last),
-        },
-      });
-    } catch {
-      results.push({ ...stock, type: 'stock', ok: false, changes: {} });
-    }
+    status.textContent = `${stock.ticker} (${processed}/${total})`;
+    const url = `https://finnhub.io/api/v1/stock/candle?symbol=${stock.ticker}&resolution=D&from=${from1Y}&to=${now}&token=${FINNHUB_API_KEY}`;
+    const changes = await buildChanges(url, stock.ticker);
+    results.push({
+      ...stock, type: 'stock',
+      price:   liveQuotes[stock.ticker] || null,
+      weight:  MARKET_WEIGHTS[stock.ticker] || 10,
+      changes,
+    });
     await new Promise(r => setTimeout(r, 250));
   }
 
   for (const crypto of CRYPTOS) {
     processed++;
-    status.textContent = `Fetching ${crypto.ticker}… (${processed}/${total})`;
-    try {
-      const from = ts5Y - 30 * 86400;
-      const url  = `https://finnhub.io/api/v1/crypto/candle?symbol=${crypto.symbol}&resolution=W&from=${from}&to=${now}&token=${FINNHUB_API_KEY}`;
-      const c    = await fetchCandles5Y(url);
-      const last = c.c[c.c.length - 1];
-      results.push({
-        ...crypto, type: 'crypto', ok: true,
-        changes: {
-          '1D':  dailyChanges[crypto.ticker] ?? null,
-          '1W':  pctDiff(priceAtTs(c, ts1W),  last),
-          'YTD': pctDiff(priceAtTs(c, tsYTD), last),
-          '1Y':  pctDiff(priceAtTs(c, ts1Y),  last),
-          '5Y':  pctDiff(priceAtTs(c, ts5Y),  last),
-        },
-      });
-    } catch {
-      results.push({ ...crypto, type: 'crypto', ok: false, changes: {} });
-    }
+    status.textContent = `${crypto.ticker} (${processed}/${total})`;
+    // Crypto candles (Binance) often have longer history — try 5Y first
+    const from = Math.min(from1Y, ts5Y - 30 * 86400);
+    const url  = `https://finnhub.io/api/v1/crypto/candle?symbol=${crypto.symbol}&resolution=W&from=${from}&to=${now}&token=${FINNHUB_API_KEY}`;
+    const changes = await buildChanges(url, crypto.ticker);
+    results.push({
+      ...crypto, type: 'crypto',
+      price:   liveQuotes[crypto.ticker] || null,
+      weight:  MARKET_WEIGHTS[crypto.ticker] || 5,
+      changes,
+    });
     await new Promise(r => setTimeout(r, 250));
   }
 
-  renderHeatmap(results);
+  heatmapLoadedData = results;
+  renderTreemap(results, currentHeatmapPeriod);
+
+  tabs.style.display = 'flex';
   status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-  btn.textContent = '↻ Refresh Heatmap';
-  btn.disabled    = false;
+  btn.textContent    = '↻ Refresh';
+  btn.disabled       = false;
 }
+
+// Period tab switching
+document.getElementById('periodTabs').addEventListener('click', e => {
+  const btn = e.target.closest('.period-btn');
+  if (!btn || !heatmapLoadedData) return;
+  document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentHeatmapPeriod = btn.dataset.period;
+  renderTreemap(heatmapLoadedData, currentHeatmapPeriod);
+});
 
 document.getElementById('heatmapLoadBtn').addEventListener('click', () => {
   if (!document.getElementById('heatmapLoadBtn').disabled) loadHeatmap();
+});
+
+// Re-render treemap on window resize
+let _hmResizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(_hmResizeTimer);
+  _hmResizeTimer = setTimeout(() => {
+    if (heatmapLoadedData) renderTreemap(heatmapLoadedData, currentHeatmapPeriod);
+  }, 180);
 });
 
 /* ============================================================

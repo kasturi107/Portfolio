@@ -19,6 +19,7 @@
         <li><a href="#home"     class="nav-link active">Home</a></li>
         <li><a href="#about"    class="nav-link">About</a></li>
         <li><a href="#projects" class="nav-link">Projects</a></li>
+        <li><a href="dynamic-dca.html" class="nav-link">DCA Tool</a></li>
         <li><a href="#contact"  class="nav-link">Contact</a></li>
       </ul>
       <button class="hamburger" id="hamburger" aria-label="Toggle menu">
@@ -127,29 +128,23 @@
       <div class="subsection" style="margin-top: 3.5rem;">
         <h3 class="subsection-title">Performance Heatmap</h3>
         <p class="subsection-desc">
-          Multi-period percentage returns for all tracked stocks and cryptos — 1D, 1W, YTD, 1Y, and 5Y.
-          Cell color intensity reflects the magnitude of the move. Loads on demand to conserve API calls.
+          Multi-period returns across all tracked assets, cells sized by approximate market cap.
+          Loads on demand — switch periods instantly once data is fetched.
         </p>
 
         <div class="heatmap-controls">
           <button class="btn-refresh" id="heatmapLoadBtn">&#9654;&nbsp;Load Heatmap</button>
+          <div class="period-tabs" id="periodTabs" style="display:none;">
+            <button class="period-btn active" data-period="1D">1D</button>
+            <button class="period-btn" data-period="1W">1W</button>
+            <button class="period-btn" data-period="YTD">YTD</button>
+            <button class="period-btn" data-period="1Y">1Y</button>
+            <button class="period-btn" data-period="5Y">5Y</button>
+          </div>
           <span class="heatmap-status" id="heatmapStatus"></span>
         </div>
 
-        <div id="heatmapWrapper" style="display:none;">
-          <div class="heatmap-legend">
-            <span class="hl-label">Scale:</span>
-            <span class="hl-item hl-sn2">&lt;&minus;20%</span>
-            <span class="hl-item hl-sn1">&minus;20% &rarr; &minus;5%</span>
-            <span class="hl-item hl-s0">&minus;5% &rarr; 0%</span>
-            <span class="hl-item hl-sp0">0% &rarr; +5%</span>
-            <span class="hl-item hl-sp1">+5% &rarr; +20%</span>
-            <span class="hl-item hl-sp2">&gt;+20%</span>
-          </div>
-          <div class="heatmap-scroll">
-            <table class="heatmap-table" id="heatmapTable"></table>
-          </div>
-        </div>
+        <div class="treemap-container" id="treemapContainer"></div>
       </div>
 
     </div>
@@ -212,6 +207,7 @@
     <p>&copy; 2026 Kasturi &nbsp;·&nbsp; Built with HTML, CSS &amp; JavaScript</p>
   </footer>
 
+  <script src="https://d3js.org/d3.v7.min.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
