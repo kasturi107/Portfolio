@@ -340,6 +340,17 @@ h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif; }
   user-select: none;
 }
 
+/* Circular profile photo — drops into the same centered wrapper as the placeholder */
+.about-photo {
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--accent-cyan);
+  box-shadow: 0 0 40px rgba(0, 212, 255, 0.18);
+  display: block;
+}
+
 .about-text p {
   color: var(--text-secondary);
   font-size: 1.05rem;
