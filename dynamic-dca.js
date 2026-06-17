@@ -19,14 +19,10 @@ const DEFAULT_BANDS = [
   { from: 0.5, to: 1.0, mult: 0 },
 ];
 
-/* ---------- MVRV Z-Score normalization bounds ----------
-   Calibrated to the EXPANDING-WINDOW Z-score, which (because the running
-   mean/std absorb 2011–2013's volatility) tops out near +3 in modern cycles
-   rather than the +7/+8 of the classic fixed-window version. These bounds map
-   bear-market bottoms → ~0 (low risk, accumulate) and cycle tops → ~0.6–1.0
-   (high risk, stop buying), per the 0–0.4 low / 0.6–1.0 high target. */
-const Z_MIN = -1.0;   // extreme fear / cycle bottoms  → risk 0
-const Z_MAX = 3.0;    // extreme greed / cycle tops    → risk 1
+/* ---------- MVRV Z-Score normalization ----------
+   Normalization bounds are computed DYNAMICALLY from the actual fetched z-score
+   series (min/max) inside computeRisk(), rather than hardcoded — see STEP 1. This
+   keeps the [0,1] mapping calibrated to whatever range Coin Metrics returns. */
 
 /* ---------- State ---------- */
 let riskData = null;          // { map, dates, todayRisk, count, firstDate, lastDate } from Coin Metrics
@@ -138,8 +134,10 @@ async function fetchRiskData(onProgress) {
 
 /**
  * Compute the normalized MVRV Z-Score risk series using an expanding window.
- * For each day i (chronological): use all data from day 0..i to derive the
- * running mean & population std of MVRV, then z-score and clamp to [0,1].
+ * Pass 1: for each day i (chronological), use all data from day 0..i to derive
+ * the running mean & population std of MVRV, then the z-score. Pass 2: normalize
+ * each z-score to [0,1] using the ACTUAL historical min/max of the z-score series
+ * (calibrated to the data Coin Metrics returns, not hardcoded bounds).
  */
 function computeRisk(rows) {
   // Parse & keep only days where the MVRV ratio is present and valid.
@@ -151,7 +149,10 @@ function computeRisk(rows) {
   }
   pts.sort((a, b) => a.date.localeCompare(b.date));
 
-  const map = {};
+  // --- Pass 1: raw z-scores (expanding window) ---
+  const zMap = {};    // date -> raw z-score
+  const mvrvMap = {}; // date -> raw MVRV ratio
+  const zScores = [];
   let sum = 0, sumSq = 0, n = 0;
   for (const p of pts) {
     sum += p.mvrv;
@@ -161,16 +162,55 @@ function computeRisk(rows) {
     const variance = Math.max(0, sumSq / n - mean * mean); // population variance
     const std = Math.sqrt(variance);
     const z = std > 0 ? (p.mvrv - mean) / std : 0;
-    map[p.date] = clamp((z - Z_MIN) / (Z_MAX - Z_MIN), 0, 1);
+    zMap[p.date] = z;
+    mvrvMap[p.date] = p.mvrv;
+    zScores.push(z);
+  }
+
+  // --- Dynamic normalization bounds from the actual data (STEP 1) ---
+  const zMin = zScores.length ? Math.min(...zScores) : 0;
+  const zMax = zScores.length ? Math.max(...zScores) : 1;
+  const zMean = zScores.length ? zScores.reduce((a, b) => a + b, 0) / zScores.length : 0;
+  const span = zMax - zMin;
+
+  // --- Pass 2: normalize to [0,1] ---
+  const map = {};
+  for (const p of pts) {
+    map[p.date] = span > 0 ? clamp((zMap[p.date] - zMin) / span, 0, 1) : 0;
   }
 
   const dates = Object.keys(map).sort();
+  const lastDate = dates.length ? dates[dates.length - 1] : null;
+
+  // --- STEP 2: console debug output ---
+  if (lastDate) {
+    console.log('=== MVRV Z-Score Debug ===');
+    console.log('Raw MVRV ratio today:', mvrvMap[lastDate]);
+    console.log('Raw Z-Score today:', zMap[lastDate]);
+    console.log('Historical Z-Score min:', zMin);
+    console.log('Historical Z-Score max:', zMax);
+    console.log('Historical Z-Score mean:', zMean);
+    console.log('Normalized risk today [0–1]:', map[lastDate]);
+    console.log('=========================');
+
+    // Spot checks for known reference dates (forward-filled from nearest prior day).
+    const refs = ['2019-01-01', '2021-04-14', '2021-11-10', '2022-11-21', '2024-03-14', '2026-06-13'];
+    for (const d of refs) {
+      const z = forwardFill(zMap, dates, d);
+      const r = forwardFill(map, dates, d);
+      console.log(`Spot check ${d}: Z-Score =`, z, '| Risk =', r);
+    }
+  }
+
   return {
-    map, dates,
+    map, dates, zMap, mvrvMap,
+    zMin, zMax, zMean,
     count: dates.length,
     firstDate: dates[0],
-    lastDate: dates[dates.length - 1],
-    todayRisk: dates.length ? map[dates[dates.length - 1]] : null,
+    lastDate,
+    todayRisk: dates.length ? map[lastDate] : null,
+    todayZ: dates.length ? zMap[lastDate] : null,
+    todayMvrv: dates.length ? mvrvMap[lastDate] : null,
   };
 }
 
@@ -480,6 +520,10 @@ function updateRiskCard() {
   el.style.color = riskColor(r, 1);
   $('riskBarMarker').style.left = (r * 100) + '%';
   $('riskTodayDate').textContent = `as of ${riskData.lastDate}`;
+  // STEP 3: show the raw MVRV Z-Score so it can be cross-checked externally.
+  if (riskData.todayZ != null) {
+    $('riskTodayRaw').textContent = `raw MVRV Z-Score: ${riskData.todayZ.toFixed(2)}`;
+  }
   $('riskInfoCard').style.display = 'block';
 }
 
