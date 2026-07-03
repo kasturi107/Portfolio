@@ -1,14 +1,43 @@
 /* ============================================================
-   Dynamic DCA Backtester
-   Pure vanilla JS. Fetches BTC price history from CoinGecko and
-   computes a daily on-chain risk score (MVRV Z-Score, normalized
-   to 0–1) from the Coin Metrics free Community API. Simulates a
-   risk-weighted DCA strategy vs a flat DCA baseline and renders
-   summary stats, three Chart.js charts and a table.
+   Dynamic DCA Backtester — Bitcoin & Ethereum
+   Pure vanilla JS. Fetches daily price history (bundled CSV +
+   CoinGecko recent gap) and computes a daily on-chain risk score
+   (MVRV Z-Score, normalized to 0–1) from the Coin Metrics free
+   Community API. Simulates a risk-weighted DCA strategy vs a flat
+   DCA baseline and renders summary stats, three Chart.js charts
+   and a table. A single asset selector toggles between BTC and ETH;
+   each asset's data is fetched once and cached independently.
    ============================================================ */
 
 /* ---------- Tiny DOM helper ---------- */
 const $ = (id) => document.getElementById(id);
+
+/* ---------- Per-asset configuration ---------- */
+const ASSETS = {
+  btc: {
+    name: 'Bitcoin',
+    symbol: 'BTC',
+    glyph: '₿',
+    priceCSV: './data/btc_daily_price.csv',
+    coingeckoId: 'bitcoin',
+    coinmetricsAsset: 'btc',
+    defaultStartDate: '2019-01-01',
+    color: '#f7931a', // BTC orange
+    // Reference dates for the debug spot-check log (nearest-prior fill).
+    spotChecks: ['2019-01-01', '2021-04-14', '2021-11-10', '2022-11-21', '2024-03-14', '2026-06-13'],
+  },
+  eth: {
+    name: 'Ethereum',
+    symbol: 'ETH',
+    glyph: 'Ξ',
+    priceCSV: './data/eth_daily_price.csv',
+    coingeckoId: 'ethereum',
+    coinmetricsAsset: 'eth',
+    defaultStartDate: '2017-01-01',
+    color: '#627eea', // ETH blue
+    spotChecks: ['2018-12-15', '2021-05-12', '2021-11-10', '2022-06-18', '2024-03-12'],
+  },
+};
 
 /* ---------- Default risk bands ---------- */
 const DEFAULT_BANDS = [
@@ -25,20 +54,25 @@ const DEFAULT_BANDS = [
    keeps the [0,1] mapping calibrated to whatever range Coin Metrics returns. */
 
 /* ---------- State ---------- */
-let riskData = null;          // { map, dates, todayRisk, count, firstDate, lastDate } from Coin Metrics
-let riskCsvData = null;       // fallback: sorted array of { date, risk }
-let useCsvFallback = false;   // true once a fallback CSV is loaded
-const charts = {};            // Chart.js instances, so we can destroy on rerun
-// Price data lives on window.btcPriceCache ({date -> close}) + window.btcPriceMeta (diagnostics)
+let currentAsset = 'btc';              // active asset key ('btc' | 'eth')
+let userChangedStartDate = false;      // true once the user edits the start date manually
+const priceCache = { btc: null, eth: null }; // { map, dates, … } price meta per asset
+const riskCache  = { btc: null, eth: null }; // computeRisk() output per asset
+const riskCsvData = { btc: null, eth: null }; // fallback: sorted array of { date, risk } per asset
+const useCsvFallback = { btc: false, eth: false }; // true once a fallback CSV is loaded for that asset
+const charts = {};                     // Chart.js instances, so we can destroy on rerun
 
 /* ============================================================
    INITIALISATION
    ============================================================ */
 document.addEventListener('DOMContentLoaded', () => {
-  $('endDate').value = isoDate(new Date());   // default end = today
+  $('endDate').value = isoDate(new Date());          // default end = today
+  $('startDate').value = ASSETS[currentAsset].defaultStartDate;
   renderBands(DEFAULT_BANDS);
   setupNav();
   setupEvents();
+  updateAssetLabels(currentAsset);
+  runBacktest();                                     // auto-run for the default asset (BTC)
 });
 
 /* ---------- Mobile nav (mirrors the main site) ---------- */
@@ -54,9 +88,52 @@ function setupEvents() {
   $('addBandBtn').addEventListener('click', () => addBandRow({ from: 0, to: 0, mult: 1 }));
   $('runBtn').addEventListener('click', runBacktest);
   $('retryBtn').addEventListener('click', runBacktest);
+  // Asset selector: switch on click.
+  $('assetToggle').querySelectorAll('.asset-btn').forEach((btn) => {
+    btn.addEventListener('click', () => switchAsset(btn.dataset.asset));
+  });
+  // Track whether the user has manually overridden the start date.
+  $('startDate').addEventListener('change', () => { userChangedStartDate = true; });
   // Fallback CSV controls (only visible after an auto-fetch failure)
   $('downloadTemplate').addEventListener('click', downloadTemplate);
   $('csvFile').addEventListener('change', handleCsvUpload);
+}
+
+/* ============================================================
+   ASSET SWITCHING (STEP 4 + STEP 9)
+   ============================================================ */
+function switchAsset(assetKey) {
+  if (!ASSETS[assetKey] || assetKey === currentAsset) return;
+  currentAsset = assetKey;
+
+  console.log('[DCA] Asset switched to:', assetKey);
+  console.log('[DCA] Using cached data:', !!priceCache[assetKey]);
+
+  updateAssetToggle(assetKey);
+  // Only override the start date if the user hasn't set their own.
+  if (!userChangedStartDate) $('startDate').value = ASSETS[assetKey].defaultStartDate;
+  updateAssetLabels(assetKey);
+
+  console.log('[DCA] Backtest re-run with', assetKey.toUpperCase());
+  runBacktest(); // fetches if the cache is empty, otherwise reuses cached data
+}
+
+/** Highlight the active asset button. */
+function updateAssetToggle(assetKey) {
+  $('assetToggle').querySelectorAll('.asset-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.asset === assetKey);
+  });
+}
+
+/** Update all static UI labels that name the asset. */
+function updateAssetLabels(assetKey) {
+  const cfg = ASSETS[assetKey];
+  $('introName').textContent = cfg.name;
+  $('introSym1').textContent = cfg.symbol;
+  $('introSym2').textContent = cfg.symbol;
+  $('riskSource').textContent = `Risk source: MVRV Z-Score (Coin Metrics, normalized 0→1) — ${cfg.name}`;
+  $('statBtcLabel').textContent = `${cfg.symbol} Accumulated`;
+  $('chartBtcTitle').textContent = `Cumulative ${cfg.symbol} Accumulated`;
 }
 
 /* ============================================================
@@ -102,17 +179,18 @@ function multiplierForRisk(risk, bands) {
 }
 
 /* ============================================================
-   STEP 1+2 — COIN METRICS FETCH & RISK COMPUTATION
+   STEP 1+2 — COIN METRICS FETCH & RISK COMPUTATION (per asset)
    ============================================================ */
-async function fetchRiskData(onProgress) {
-  if (riskData) return riskData; // cached for this session
+async function fetchRiskData(assetKey, onProgress) {
+  if (riskCache[assetKey]) return riskCache[assetKey]; // cached for this session
 
+  const cfg = ASSETS[assetKey];
   onProgress && onProgress('Fetching on-chain data…');
   const today = isoDate(new Date());
   // CapMVRVCur (market cap ÷ realized cap) is available on the free Community tier;
   // the raw realized cap (CapRealUSD) is Pro-only, so we use the ready-made ratio.
   let url = `https://community-api.coinmetrics.io/v4/timeseries/asset-metrics` +
-    `?assets=btc&metrics=CapMVRVCur&frequency=1d` +
+    `?assets=${cfg.coinmetricsAsset}&metrics=CapMVRVCur&frequency=1d` +
     `&start_time=2012-01-01&end_time=${today}&page_size=10000`;
 
   const rows = [];
@@ -128,8 +206,8 @@ async function fetchRiskData(onProgress) {
   }
 
   if (rows.length === 0) throw new Error('Coin Metrics returned no data.');
-  riskData = computeRisk(rows);
-  return riskData;
+  riskCache[assetKey] = computeRisk(rows, assetKey);
+  return riskCache[assetKey];
 }
 
 /**
@@ -139,7 +217,8 @@ async function fetchRiskData(onProgress) {
  * each z-score to [0,1] using the ACTUAL historical min/max of the z-score series
  * (calibrated to the data Coin Metrics returns, not hardcoded bounds).
  */
-function computeRisk(rows) {
+function computeRisk(rows, assetKey) {
+  const cfg = ASSETS[assetKey];
   // Parse & keep only days where the MVRV ratio is present and valid.
   const pts = [];
   for (const r of rows) {
@@ -184,7 +263,7 @@ function computeRisk(rows) {
 
   // --- STEP 2: console debug output ---
   if (lastDate) {
-    console.log('=== MVRV Z-Score Debug ===');
+    console.log(`=== ${cfg.symbol} MVRV Z-Score Debug ===`);
     console.log('Raw MVRV ratio today:', mvrvMap[lastDate]);
     console.log('Raw Z-Score today:', zMap[lastDate]);
     console.log('Historical Z-Score min:', zMin);
@@ -194,8 +273,7 @@ function computeRisk(rows) {
     console.log('=========================');
 
     // Spot checks for known reference dates (forward-filled from nearest prior day).
-    const refs = ['2019-01-01', '2021-04-14', '2021-11-10', '2022-11-21', '2024-03-14', '2026-06-13'];
-    for (const d of refs) {
+    for (const d of cfg.spotChecks) {
       const z = forwardFill(zMap, dates, d);
       const r = forwardFill(map, dates, d);
       console.log(`Spot check ${d}: Z-Score =`, z, '| Risk =', r);
@@ -217,12 +295,13 @@ function computeRisk(rows) {
 /* ============================================================
    RISK LOOKUP (STEP 3 — forward-fill from nearest prior date)
    ============================================================ */
-function riskForDate(dateStr) {
-  if (useCsvFallback && riskCsvData && riskCsvData.length) {
-    return forwardFillArr(riskCsvData, dateStr);
+function riskForDate(dateStr, assetKey) {
+  if (useCsvFallback[assetKey] && riskCsvData[assetKey] && riskCsvData[assetKey].length) {
+    return forwardFillArr(riskCsvData[assetKey], dateStr);
   }
-  if (!riskData) return 0;
-  return forwardFill(riskData.map, riskData.dates, dateStr);
+  const rd = riskCache[assetKey];
+  if (!rd) return 0;
+  return forwardFill(rd.map, rd.dates, dateStr);
 }
 
 /** Largest date <= target via binary search; clamps to first entry if target precedes all. */
@@ -251,26 +330,27 @@ function forwardFillArr(arr, target) {
 }
 
 /* ============================================================
-   PRICE DATA — bundled CSV (2017→present) + CoinGecko recent gap
+   PRICE DATA — bundled CSV (history) + CoinGecko recent gap (per asset)
    ============================================================ */
 
 /**
- * Load BTC daily prices. The bulk of history comes from a bundled static CSV
- * (Binance daily close via CryptoDataDownload), which sidesteps CoinGecko's
+ * Load daily prices for an asset. The bulk of history comes from a bundled static
+ * CSV (Binance daily close via CryptoDataDownload), which sidesteps CoinGecko's
  * 365-day free-API limit. Only the recent gap between the CSV's last date and
- * today is patched in from CoinGecko. Cached on window for the session.
+ * today is patched in from CoinGecko. Cached per asset for the session.
  */
-async function loadPriceData(onProgress) {
-  if (window.btcPriceMeta) return window.btcPriceMeta; // already loaded this session
+async function loadPriceData(assetKey, onProgress) {
+  if (priceCache[assetKey]) return priceCache[assetKey]; // already loaded this session
 
-  onProgress && onProgress('Loading BTC price data (2017–present)…');
+  const cfg = ASSETS[assetKey];
+  onProgress && onProgress(`Loading ${cfg.symbol} price data (history)…`);
   let res;
   try {
-    res = await fetch('./data/btc_daily_price.csv');
+    res = await fetch(cfg.priceCSV);
   } catch (e) {
     throw new Error('Could not load bundled price CSV. Serve the page over http (e.g. `npx serve portfolio`); file:// blocks local fetches.');
   }
-  if (!res.ok) throw new Error(`Could not load data/btc_daily_price.csv (HTTP ${res.status}).`);
+  if (!res.ok) throw new Error(`Could not load ${cfg.priceCSV} (HTTP ${res.status}).`);
 
   const text = await res.text();
   const map = parsePriceCsv(text);
@@ -280,25 +360,24 @@ async function loadPriceData(onProgress) {
   const csvFirst = dates[0];
   const csvLast = dates[dates.length - 1];
   const csvCount = dates.length;
-  console.log(`[DCA] BTC price CSV loaded: ${csvCount} days (${csvFirst} to ${csvLast})`);
+  console.log(`[DCA] ${cfg.symbol} price CSV loaded: ${csvCount} days (${csvFirst} to ${csvLast})`);
 
   // Patch the recent gap (CSV end → today) from CoinGecko. Non-fatal on failure.
   let patchCount = 0;
   try {
     onProgress && onProgress('Fetching recent prices from CoinGecko…');
-    patchCount = await patchRecentPrices(map, csvLast);
+    patchCount = await patchRecentPrices(map, csvLast, cfg.coingeckoId);
   } catch (e) {
-    console.warn('[DCA] CoinGecko recent-price patch failed, using CSV only:', e.message);
+    console.warn(`[DCA] CoinGecko recent-price patch failed for ${cfg.symbol}, using CSV only:`, e.message);
   }
-  console.log(`[DCA] CoinGecko patch loaded: ${patchCount} days`);
+  console.log(`[DCA] CoinGecko patch loaded: ${patchCount} days (${cfg.symbol})`);
 
   dates = Object.keys(map).sort();
-  window.btcPriceCache = map;
-  window.btcPriceMeta = {
+  priceCache[assetKey] = {
     map, dates, csvFirst, csvLast, csvCount, patchCount,
     lastDate: dates[dates.length - 1],
   };
-  return window.btcPriceMeta;
+  return priceCache[assetKey];
 }
 
 /** Parse a CryptoDataDownload-style CSV into { 'YYYY-MM-DD': close }. */
@@ -340,8 +419,8 @@ function normalizeDate(raw) {
 }
 
 /** Fill dates after csvLast using CoinGecko's last-60-days endpoint. Returns # of days added. */
-async function patchRecentPrices(map, csvLast) {
-  const url = 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=60';
+async function patchRecentPrices(map, csvLast, coingeckoId) {
+  const url = `https://api.coingecko.com/api/v3/coins/${coingeckoId}/market_chart?vs_currency=usd&days=60`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
@@ -369,7 +448,7 @@ function priceForDate(target, priceMap) {
     if (diff < bestDiff) { bestDiff = diff; best = d; }
     else if (diff > bestDiff) break;
   }
-  // Only accept a neighbour within a week — keeps pre-2017 dates from snapping to the CSV start.
+  // Only accept a neighbour within a week — keeps out-of-range dates from snapping to the CSV start.
   return best && bestDiff <= 7 * 86400000 ? map[best] : null;
 }
 
@@ -394,6 +473,9 @@ function generatePeriods(startStr, endStr, freq) {
    STEP 5 — RUN: fetch both sources in parallel, then simulate
    ============================================================ */
 async function runBacktest() {
+  const assetKey = currentAsset;
+  const cfg = ASSETS[assetKey];
+
   // --- Validate inputs ---
   const startStr = $('startDate').value;
   const endStr = $('endDate').value;
@@ -407,18 +489,18 @@ async function runBacktest() {
   if (bands.length === 0) return showError('Add at least one risk band.');
 
   // --- Combined progress indicator ---
-  const prog = { price: 'Loading BTC price data (2017–present)…', risk: 'Computing risk scores…' };
+  const prog = { price: `Loading ${cfg.symbol} price data (history)…`, risk: 'Computing risk scores…' };
   const paint = () => { $('loaderText').innerHTML = `${prog.price}<br>${prog.risk}`; };
   showLoader();
   paint();
 
   // Load both sources in parallel; never reject so we can inspect each independently.
   const [priceRes, riskRes] = await Promise.all([
-    loadPriceData((msg) => { prog.price = msg; paint(); })
+    loadPriceData(assetKey, (msg) => { prog.price = msg; paint(); })
       .then((p) => ({ ok: p })).catch((e) => ({ error: e })),
-    (useCsvFallback
+    (useCsvFallback[assetKey]
       ? Promise.resolve({ ok: null })  // already have a fallback CSV; skip the auto-fetch
-      : fetchRiskData((msg) => { prog.risk = msg; paint(); })
+      : fetchRiskData(assetKey, (msg) => { prog.risk = msg; paint(); })
           .then((r) => ({ ok: r })).catch((e) => ({ error: e }))),
   ]);
 
@@ -435,22 +517,22 @@ async function runBacktest() {
   }
 
   // --- Console diagnostics ---
-  if (useCsvFallback && riskCsvData) {
-    console.log(`[DCA] Risk data loaded: ${riskCsvData.length} days (manual CSV fallback)`);
+  if (useCsvFallback[assetKey] && riskCsvData[assetKey]) {
+    console.log(`[DCA] Risk data loaded: ${riskCsvData[assetKey].length} days (manual CSV fallback)`);
   } else {
-    console.log(`[DCA] Risk data loaded: ${riskData.count} days`);
-    updateRiskCard();
+    console.log(`[DCA] Risk data loaded: ${riskCache[assetKey].count} days (${cfg.symbol} MVRV Z-Score)`);
+    updateRiskCard(assetKey);
   }
 
   // --- Simulate & render ---
   try {
-    const sim = simulate({ startStr, endStr, base, freq, bands, priceMap });
+    const sim = simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey });
     if (sim.missingDates.length === 0) {
       console.log(`[DCA] Backtest date range: ${startStr} to ${endStr} — all dates have price + risk data ✓`);
     } else {
       console.warn(`[DCA] Backtest date range: ${startStr} to ${endStr} — ${sim.missingDates.length} period(s) skipped (missing price data)`);
     }
-    renderResults(sim);
+    renderResults(sim, assetKey);
   } catch (err) {
     showError(err.message || 'Simulation failed.');
   }
@@ -459,7 +541,7 @@ async function runBacktest() {
 /* ============================================================
    BACKTEST ENGINE
    ============================================================ */
-function simulate({ startStr, endStr, base, freq, bands, priceMap }) {
+function simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey }) {
   const periods = generatePeriods(startStr, endStr, freq);
   const series = [];
   const missingDates = [];
@@ -474,7 +556,7 @@ function simulate({ startStr, endStr, base, freq, bands, priceMap }) {
       continue;
     }
 
-    const risk = riskForDate(date);              // STEP 4: daily reading on the trigger date
+    const risk = riskForDate(date, assetKey);    // STEP 4: daily reading on the trigger date
     const mult = multiplierForRisk(risk, bands);
 
     const dynAmount = base * mult;
@@ -512,17 +594,18 @@ function simulate({ startStr, endStr, base, freq, bands, priceMap }) {
 /* ============================================================
    RISK INFO CARD (STEP 6)
    ============================================================ */
-function updateRiskCard() {
-  if (!riskData || riskData.todayRisk == null) return;
-  const r = riskData.todayRisk;
+function updateRiskCard(assetKey) {
+  const rd = riskCache[assetKey];
+  if (!rd || rd.todayRisk == null) return;
+  const r = rd.todayRisk;
   const el = $('riskTodayValue');
   el.textContent = r.toFixed(2);
   el.style.color = riskColor(r, 1);
   $('riskBarMarker').style.left = (r * 100) + '%';
-  $('riskTodayDate').textContent = `as of ${riskData.lastDate}`;
+  $('riskTodayDate').textContent = `as of ${rd.lastDate}`;
   // STEP 3: show the raw MVRV Z-Score so it can be cross-checked externally.
-  if (riskData.todayZ != null) {
-    $('riskTodayRaw').textContent = `raw MVRV Z-Score: ${riskData.todayZ.toFixed(2)}`;
+  if (rd.todayZ != null) {
+    $('riskTodayRaw').textContent = `raw MVRV Z-Score: ${rd.todayZ.toFixed(2)}`;
   }
   $('riskInfoCard').style.display = 'block';
 }
@@ -530,11 +613,12 @@ function updateRiskCard() {
 /* ============================================================
    RESULTS RENDERING
    ============================================================ */
-function renderResults({ series, totals }) {
+function renderResults({ series, totals }, assetKey) {
+  const cfg = ASSETS[assetKey];
   showResults();
 
   $('statInvested').textContent = fmtUsd(totals.dynInvested);
-  $('statBtc').textContent = totals.dynBtc.toFixed(6) + ' ₿';
+  $('statBtc').textContent = totals.dynBtc.toFixed(6) + ' ' + cfg.glyph;
   $('statValue').textContent = fmtUsd(totals.dynFinalValue);
 
   const dynVal = totals.dynReturnPct;
@@ -547,24 +631,26 @@ function renderResults({ series, totals }) {
   vsEl.textContent = `${vsFlat >= 0 ? '+' : ''}${vsFlat.toFixed(1)}%`;
   vsEl.className = 'stat-value ' + (vsFlat >= 0 ? 'pos' : 'neg');
 
-  renderComparisonTable(totals);
+  renderComparisonTable(totals, assetKey);
 
   const labels = series.map((s) => s.date);
-  renderValueChart(labels, series);
-  renderBtcChart(labels, series);
+  renderValueChart(labels, series, assetKey);
+  renderBtcChart(labels, series, assetKey);
   renderInvestChart(labels, series);
 }
 
-function renderComparisonTable(t) {
+function renderComparisonTable(t, assetKey) {
+  const cfg = ASSETS[assetKey];
   const betterValue = t.dynFinalValue >= t.flatFinalValue;
   const betterCost = t.dynAvgCost <= t.flatAvgCost;
   const betterReturn = t.dynReturnPct >= t.flatReturnPct;
 
+  const g = ' ' + cfg.glyph;
   const rows = [
     ['Total invested', fmtUsd(t.dynInvested), fmtUsd(t.flatInvested), null],
-    ['BTC accumulated', t.dynBtc.toFixed(6) + ' ₿', t.flatBtc.toFixed(6) + ' ₿', t.dynBtc >= t.flatBtc ? 'dyn' : 'flat'],
+    [`${cfg.symbol} accumulated`, t.dynBtc.toFixed(6) + g, t.flatBtc.toFixed(6) + g, t.dynBtc >= t.flatBtc ? 'dyn' : 'flat'],
     ['Final value', fmtUsd(t.dynFinalValue), fmtUsd(t.flatFinalValue), betterValue ? 'dyn' : 'flat'],
-    ['Avg cost per BTC', fmtUsd(t.dynAvgCost), fmtUsd(t.flatAvgCost), betterCost ? 'dyn' : 'flat'],
+    [`Avg cost per ${cfg.symbol}`, fmtUsd(t.dynAvgCost), fmtUsd(t.flatAvgCost), betterCost ? 'dyn' : 'flat'],
     ['Return %', fmtPct(t.dynReturnPct), fmtPct(t.flatReturnPct), betterReturn ? 'dyn' : 'flat'],
   ];
 
@@ -603,16 +689,17 @@ const legendCfg = { labels: { color: '#fff', font: { family: 'Inter', size: 11 }
 
 function destroyChart(key) { if (charts[key]) { charts[key].destroy(); delete charts[key]; } }
 
-function renderValueChart(labels, series) {
+function renderValueChart(labels, series, assetKey) {
+  const cfg = ASSETS[assetKey];
   destroyChart('value');
   charts.value = new Chart($('chartValue'), {
     type: 'line',
     data: {
       labels,
       datasets: [
-        { label: 'Dynamic DCA value', data: series.map((s) => s.dynValue), borderColor: CYAN, backgroundColor: 'rgba(0,212,255,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.2, fill: true, yAxisID: 'y' },
+        { label: 'Dynamic DCA value', data: series.map((s) => s.dynValue), borderColor: cfg.color, backgroundColor: 'rgba(0,212,255,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.2, fill: true, yAxisID: 'y' },
         { label: 'Flat DCA value', data: series.map((s) => s.flatValue), borderColor: PURPLE, borderWidth: 2, pointRadius: 0, tension: 0.2, yAxisID: 'y' },
-        { label: 'BTC price (right)', data: series.map((s) => s.price), borderColor: 'rgba(255,255,255,0.35)', borderWidth: 1, borderDash: [4, 4], pointRadius: 0, tension: 0.2, yAxisID: 'yPrice' },
+        { label: `${cfg.symbol} price (right)`, data: series.map((s) => s.price), borderColor: 'rgba(255,255,255,0.35)', borderWidth: 1, borderDash: [4, 4], pointRadius: 0, tension: 0.2, yAxisID: 'yPrice' },
       ],
     },
     options: {
@@ -621,29 +708,30 @@ function renderValueChart(labels, series) {
       plugins: { legend: legendCfg, tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${fmtUsd(c.parsed.y)}` } } },
       scales: baseScales({
         y: { position: 'left', ticks: { color: TICK, font: { family: 'Roboto Mono', size: 10 }, callback: (v) => '$' + abbr(v) }, grid: { color: GRID }, title: { display: true, text: 'Portfolio value (USD)', color: TICK, font: { size: 10 } } },
-        yPrice: { position: 'right', ticks: { color: 'rgba(255,255,255,0.4)', font: { family: 'Roboto Mono', size: 10 }, callback: (v) => '$' + abbr(v) }, grid: { drawOnChartArea: false }, title: { display: true, text: 'BTC price', color: 'rgba(255,255,255,0.4)', font: { size: 10 } } },
+        yPrice: { position: 'right', ticks: { color: 'rgba(255,255,255,0.4)', font: { family: 'Roboto Mono', size: 10 }, callback: (v) => '$' + abbr(v) }, grid: { drawOnChartArea: false }, title: { display: true, text: `${cfg.symbol} price`, color: 'rgba(255,255,255,0.4)', font: { size: 10 } } },
       }),
     },
   });
 }
 
-function renderBtcChart(labels, series) {
+function renderBtcChart(labels, series, assetKey) {
+  const cfg = ASSETS[assetKey];
   destroyChart('btc');
   charts.btc = new Chart($('chartBtc'), {
     type: 'line',
     data: {
       labels,
       datasets: [
-        { label: 'Dynamic DCA BTC', data: series.map((s) => s.dynBtc), borderColor: CYAN, backgroundColor: 'rgba(0,212,255,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.2, fill: true },
-        { label: 'Flat DCA BTC', data: series.map((s) => s.flatBtc), borderColor: PURPLE, borderWidth: 2, pointRadius: 0, tension: 0.2 },
+        { label: `Dynamic DCA ${cfg.symbol}`, data: series.map((s) => s.dynBtc), borderColor: cfg.color, backgroundColor: 'rgba(0,212,255,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.2, fill: true },
+        { label: `Flat DCA ${cfg.symbol}`, data: series.map((s) => s.flatBtc), borderColor: PURPLE, borderWidth: 2, pointRadius: 0, tension: 0.2 },
       ],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
-      plugins: { legend: legendCfg, tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.parsed.y.toFixed(6)} ₿` } } },
+      plugins: { legend: legendCfg, tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.parsed.y.toFixed(6)} ${cfg.glyph}` } } },
       scales: baseScales({
-        y: { ticks: { color: TICK, font: { family: 'Roboto Mono', size: 10 }, callback: (v) => v.toFixed(3) }, grid: { color: GRID }, title: { display: true, text: 'Cumulative BTC', color: TICK, font: { size: 10 } } },
+        y: { ticks: { color: TICK, font: { family: 'Roboto Mono', size: 10 }, callback: (v) => v.toFixed(3) }, grid: { color: GRID }, title: { display: true, text: `Cumulative ${cfg.symbol}`, color: TICK, font: { size: 10 } } },
       }),
     },
   });
@@ -679,7 +767,7 @@ function renderInvestChart(labels, series) {
 }
 
 /* ============================================================
-   CSV FALLBACK (STEP 8)
+   CSV FALLBACK (STEP 8) — per active asset
    ============================================================ */
 function revealCsvFallback() {
   $('csvFallback').style.display = 'block';
@@ -689,17 +777,18 @@ function handleCsvUpload(e) {
   const file = e.target.files[0];
   const status = $('csvStatus');
   if (!file) return;
+  const assetKey = currentAsset;
   const reader = new FileReader();
   reader.onload = () => {
     try {
       const data = parseRiskCsv(reader.result);
       if (data.length === 0) throw new Error('No valid rows found.');
-      riskCsvData = data;
-      useCsvFallback = true;
-      status.textContent = `✓ Loaded ${data.length} risk points (${data[0].date} → ${data[data.length - 1].date}). Re-run the backtest.`;
+      riskCsvData[assetKey] = data;
+      useCsvFallback[assetKey] = true;
+      status.textContent = `✓ Loaded ${data.length} risk points (${data[0].date} → ${data[data.length - 1].date}) for ${ASSETS[assetKey].symbol}. Re-run the backtest.`;
       status.className = 'csv-status ok';
     } catch (err) {
-      riskCsvData = null; useCsvFallback = false;
+      riskCsvData[assetKey] = null; useCsvFallback[assetKey] = false;
       status.textContent = `✗ ${err.message}`;
       status.className = 'csv-status err';
     }
@@ -728,7 +817,7 @@ function downloadTemplate() {
   const blob = new Blob([sample], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'btc-risk-template.csv'; a.click();
+  a.href = url; a.download = `${currentAsset}-risk-template.csv`; a.click();
   URL.revokeObjectURL(url);
 }
 

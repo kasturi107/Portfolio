@@ -26,22 +26,27 @@
     }
     .tool-header p { color: var(--text-secondary); max-width: 720px; font-size: 1.02rem; }
 
-    /* ---- Cross-link to the other DCA tool ---- */
-    .tool-switch {
-      display: inline-flex; align-items: center; gap: 0.4rem;
-      margin-top: 1rem;
-      padding: 0.45rem 1rem;
-      background: transparent;
+    /* ---- Asset selector (segmented pill toggle) ---- */
+    .asset-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    .asset-btn {
+      padding: 0.6rem 0.5rem;
+      background: var(--bg-secondary);
       border: 1px solid var(--border);
       color: var(--text-secondary);
       font-family: 'Space Grotesk', sans-serif;
-      font-size: 0.8rem;
+      font-size: 0.82rem;
       font-weight: 600;
-      border-radius: 50px;
-      text-decoration: none;
-      transition: border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+      border-radius: 9px;
+      cursor: pointer;
+      transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
     }
-    .tool-switch:hover { border-color: var(--accent-cyan); color: var(--accent-cyan); box-shadow: 0 0 14px rgba(0,212,255,0.15); }
+    .asset-btn:hover { border-color: var(--accent-cyan); color: var(--text-primary); }
+    .asset-btn.active {
+      border-color: transparent;
+      color: #fff;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      box-shadow: 0 0 14px rgba(0,212,255,0.25);
+    }
 
     /* ---- Layout: controls + results ---- */
     .dca-layout { display: grid; grid-template-columns: 360px 1fr; gap: 2rem; align-items: start; }
@@ -301,9 +306,9 @@
       <div class="tool-header">
         <h1>Dynamic DCA Backtester</h1>
         <p>
-          Simulate a risk-weighted Bitcoin dollar-cost-averaging strategy: invest
-          <em>more</em> when BTC risk is low and <em>less</em> (or nothing) when risk is high.
-          Risk is a 0–1 metric approximating Benjamin Cowen's BTC Risk framework, computed
+          Simulate a risk-weighted <span id="introName">Bitcoin</span> dollar-cost-averaging strategy: invest
+          <em>more</em> when <span id="introSym1">BTC</span> risk is low and <em>less</em> (or nothing) when risk is high.
+          Risk is a 0–1 metric approximating Benjamin Cowen's <span id="introSym2">BTC</span> Risk framework, computed
           automatically from on-chain data (MVRV Z-Score via Coin Metrics). Historical prices
           come from a bundled historical dataset — no API keys, no manual input.
         </p>
@@ -311,7 +316,6 @@
           Price data: Binance daily close (CryptoDataDownload) + CoinGecko for recent 60 days
           &nbsp;·&nbsp; Risk: MVRV Z-Score (Coin Metrics)
         </p>
-        <a href="dynamic-dca-eth.html" class="tool-switch">Switch to Ethereum DCA &rarr;</a>
       </div>
 
       <div class="dca-layout">
@@ -322,6 +326,14 @@
         <!-- ============ CONTROLS PANEL ============ -->
         <aside class="panel" id="controls">
           <div class="panel-title">Strategy Settings</div>
+
+          <div class="field">
+            <label>Asset</label>
+            <div class="asset-toggle" id="assetToggle">
+              <button type="button" class="asset-btn active" data-asset="btc">Bitcoin (BTC)</button>
+              <button type="button" class="asset-btn" data-asset="eth">Ethereum (ETH)</button>
+            </div>
+          </div>
 
           <div class="field-row">
             <div class="field">
@@ -370,7 +382,7 @@
         <!-- ============ RISK METRIC INFO CARD ============ -->
         <div class="panel info-card" id="riskInfoCard" style="display:none;">
           <div class="panel-title">Risk Metric</div>
-          <div class="risk-source">Risk source: MVRV Z-Score (Coin Metrics, normalized 0→1)</div>
+          <div class="risk-source" id="riskSource">Risk source: MVRV Z-Score (Coin Metrics, normalized 0→1) — Bitcoin</div>
           <div class="risk-today">
             <span class="risk-today-label">Latest risk</span>
             <span class="risk-today-value" id="riskTodayValue">—</span>
@@ -425,7 +437,7 @@
                 <div class="stat-sub">Dynamic DCA</div>
               </div>
               <div class="stat-card">
-                <div class="stat-label">BTC Accumulated</div>
+                <div class="stat-label" id="statBtcLabel">BTC Accumulated</div>
                 <div class="stat-value" id="statBtc">—</div>
                 <div class="stat-sub">Dynamic DCA</div>
               </div>
@@ -448,7 +460,7 @@
             </div>
 
             <div class="chart-card">
-              <h3>Cumulative BTC Accumulated</h3>
+              <h3 id="chartBtcTitle">Cumulative BTC Accumulated</h3>
               <div class="chart-wrap"><canvas id="chartBtc"></canvas></div>
             </div>
 
