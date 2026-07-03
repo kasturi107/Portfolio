@@ -26,6 +26,23 @@
     }
     .tool-header p { color: var(--text-secondary); max-width: 720px; font-size: 1.02rem; }
 
+    /* ---- Cross-link to the other DCA tool ---- */
+    .tool-switch {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      margin-top: 1rem;
+      padding: 0.45rem 1rem;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border-radius: 50px;
+      text-decoration: none;
+      transition: border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .tool-switch:hover { border-color: var(--accent-cyan); color: var(--accent-cyan); box-shadow: 0 0 14px rgba(0,212,255,0.15); }
+
     /* ---- Layout: controls + results ---- */
     .dca-layout { display: grid; grid-template-columns: 360px 1fr; gap: 2rem; align-items: start; }
 
@@ -294,6 +311,7 @@
           Price data: Binance daily close (CryptoDataDownload) + CoinGecko for recent 60 days
           &nbsp;·&nbsp; Risk: MVRV Z-Score (Coin Metrics)
         </p>
+        <a href="dynamic-dca-eth.html" class="tool-switch">Switch to Ethereum DCA &rarr;</a>
       </div>
 
       <div class="dca-layout">
