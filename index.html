@@ -135,29 +135,6 @@
         <div class="stocks-grid" id="cryptosGrid"></div>
       </div>
 
-      <!-- ---- PERFORMANCE HEATMAP SUBSECTION ---- -->
-      <div class="subsection" style="margin-top: 3.5rem;">
-        <h3 class="subsection-title">Performance Heatmap</h3>
-        <p class="subsection-desc">
-          Multi-period returns across all tracked assets, cells sized by approximate market cap.
-          Loads on demand — switch periods instantly once data is fetched.
-        </p>
-
-        <div class="heatmap-controls">
-          <button class="btn-refresh" id="heatmapLoadBtn">&#9654;&nbsp;Load Heatmap</button>
-          <div class="period-tabs" id="periodTabs" style="display:none;">
-            <button class="period-btn active" data-period="1D">1D</button>
-            <button class="period-btn" data-period="1W">1W</button>
-            <button class="period-btn" data-period="YTD">YTD</button>
-            <button class="period-btn" data-period="1Y">1Y</button>
-            <button class="period-btn" data-period="5Y">5Y</button>
-          </div>
-          <span class="heatmap-status" id="heatmapStatus"></span>
-        </div>
-
-        <div class="treemap-container" id="treemapContainer"></div>
-      </div>
-
     </div>
   </section>
 
@@ -218,7 +195,6 @@
     <p>&copy; 2026 Kasturi &amp; Sandip &nbsp;·&nbsp; Built with HTML, CSS &amp; JavaScript</p>
   </footer>
 
-  <script src="https://d3js.org/d3.v7.min.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
