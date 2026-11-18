@@ -265,6 +265,19 @@
     }
     .risk-scale { display: flex; justify-content: space-between; font-size: 0.62rem; color: var(--text-muted); font-family: 'Roboto Mono', monospace; margin-top: -0.4rem; }
 
+    /* ---- Data coverage panel (warning state reuses the error-box danger tokens) ---- */
+    .coverage-row {
+      display: flex; justify-content: space-between; gap: 0.8rem;
+      font-size: 0.74rem; font-family: 'Roboto Mono', monospace; color: var(--text-secondary);
+      padding: 0.35rem 0; border-bottom: 1px solid var(--border);
+    }
+    .coverage-row span:first-child { color: var(--text-muted); white-space: nowrap; }
+    .coverage-row span:last-child { text-align: right; overflow-wrap: anywhere; }
+    .coverage-row:last-child { border-bottom: none; }
+    .coverage-warn { border-color: rgba(255,76,76,0.25); background: var(--danger-glow); }
+    .coverage-warn .coverage-row:last-child span:last-child,
+    .coverage-warn .coverage-note { color: var(--danger); }
+
     /* CSV fallback panel */
     .csv-fallback input[type="file"] {
       width: 100%; font-size: 0.78rem; color: var(--text-secondary); margin: 0.6rem 0;
@@ -435,6 +448,13 @@
           </p>
         </div>
 
+        <!-- ============ DATA COVERAGE (filled by renderCoverage() every run) ============ -->
+        <div class="panel info-card" id="coverageCard" style="display:none;">
+          <div class="panel-title">Data Coverage</div>
+          <div id="coverageRows"></div>
+          <p class="hint coverage-note" id="coverageNote"></p>
+        </div>
+
         <!-- ============ CSV FALLBACK (revealed only if Coin Metrics fails) ============ -->
         <div class="panel csv-fallback" id="csvFallback" style="display:none;">
           <div class="panel-title">Risk Data — Manual Fallback</div>
@@ -445,6 +465,11 @@
           <input type="file" id="csvFile" accept=".csv,text/csv" />
           <button class="link-inline" id="downloadTemplate">Download template CSV</button>
           <p class="csv-status" id="csvStatus"></p>
+          <p class="hint">
+            Prices come from a bundled CSV snapshot. To refresh it, replace
+            <code>data/btc_daily_price.csv</code> (or <code>data/eth_daily_price.csv</code>) with a fresh
+            <a href="https://www.cryptodatadownload.com/data/binance/" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">Binance daily export</a>.
+          </p>
         </div>
 
        </div><!-- /.dca-left -->
@@ -490,6 +515,7 @@
                 <div class="stat-sub">Value-per-dollar advantage</div>
               </div>
             </div>
+            <p class="hint" id="simNotes" style="margin:-1.2rem 0 1.6rem;"></p>
 
             <!-- Charts -->
             <div class="chart-card">

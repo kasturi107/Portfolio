@@ -617,22 +617,48 @@ async function loadPriceData(assetKey, onProgress) {
   const csvCount = dates.length;
   console.log(`[DCA] ${cfg.symbol} price CSV loaded: ${csvCount} days (${csvFirst} to ${csvLast})`);
 
-  // Patch the recent gap (CSV end → today) from CoinGecko. Non-fatal on failure.
-  let patchCount = 0;
-  try {
-    onProgress && onProgress('Fetching recent prices from CoinGecko…');
-    patchCount = await patchRecentPrices(map, csvLast, cfg.coingeckoId);
-  } catch (e) {
-    console.warn(`[DCA] CoinGecko recent-price patch failed for ${cfg.symbol}, using CSV only:`, e.message);
+  // Patch the recent gap (CSV end → today) from CoinGecko. Never throws; returns a status object.
+  onProgress && onProgress('Fetching recent prices from CoinGecko…');
+  const patch = await patchRecentPrices(map, csvLast, cfg.coingeckoId);
+  if (patch.ok) {
+    console.log(`[DCA] CoinGecko patch loaded: ${patch.added} days (${cfg.symbol}, ${patch.firstPatched} → ${patch.lastPatched})` +
+      (patch.reason ? ` — partial: ${patch.reason}` : ''));
+  } else {
+    console.warn(`[DCA] CoinGecko recent-price patch failed for ${cfg.symbol}, using CSV only:`, patch.reason);
   }
-  console.log(`[DCA] CoinGecko patch loaded: ${patchCount} days (${cfg.symbol})`);
 
   dates = Object.keys(map).sort();
   priceCache[assetKey] = {
-    map, dates, csvFirst, csvLast, csvCount, patchCount,
+    map, dates, csvFirst, csvLast, csvCount,
+    patch, patchCount: patch.ok ? patch.added : 0,
+    coverage: computeCoverage(map, csvFirst, csvLast, patch),
     lastDate: dates[dates.length - 1],
   };
   return priceCache[assetKey];
+}
+
+/**
+ * Coverage summary for the banner: CSV range, CoinGecko patch range, and the days in
+ * (csvLast, today] that still have no price.
+ */
+function computeCoverage(map, csvFirst, csvLast, patch) {
+  const today = isoDate(new Date());
+  const runs = []; // contiguous [from, to] runs of days without a price
+  let uncoveredDays = 0;
+  for (let d = addDaysIso(csvLast, 1); d <= today; d = addDaysIso(d, 1)) {
+    if (d in map) continue;
+    uncoveredDays++;
+    const last = runs[runs.length - 1];
+    if (last && addDaysIso(last.to, 1) === d) last.to = d;
+    else runs.push({ from: d, to: d });
+  }
+  return { csvFirst, csvLast, today, patch, uncoveredDays, uncoveredRuns: runs };
+}
+
+/** 'YYYY-MM-DD' + n calendar days (UTC arithmetic, so DST never shifts the date). */
+function addDaysIso(dateStr, n) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 
 /** Parse a CryptoDataDownload-style CSV into { 'YYYY-MM-DD': close }. */
@@ -673,29 +699,113 @@ function normalizeDate(raw) {
   return isNaN(d) ? null : isoDate(d);
 }
 
-/** Fill dates after csvLast using CoinGecko's last-60-days endpoint. Returns # of days added. */
+/**
+ * Fill dates after csvLast with CoinGecko prices, sizing the request to the CSV's arrears.
+ * Never throws. Returns { ok: true, added, firstPatched, lastPatched, source: 'coingecko'
+ * [, reason] } (reason is set when only part of the gap could be filled) or
+ * { ok: false, reason }.
+ *
+ * TODO: add .github/workflows/data-refresh.yml to refresh data/*.csv monthly from the same
+ * Binance daily export. This patch would then only have to cover a few weeks.
+ */
 async function patchRecentPrices(map, csvLast, coingeckoId) {
-  const url = `https://api.coingecko.com/api/v3/coins/${coingeckoId}/market_chart?vs_currency=usd&days=60`;
-  const res = await fetch(url);
+  const todayIso = isoDate(new Date());
+  const arrearsDays = Math.ceil(
+    (new Date(todayIso).getTime() - new Date(csvLast).getTime())
+    / 86400000
+  );
+  const days = Math.min(365, Math.max(60, arrearsDays + 2)); // ≥60 as before, ≤365 (free-tier max)
+  const base = `https://api.coingecko.com/api/v3/coins/${coingeckoId}`;
+  const added = [];
+  const failures = [];
+
+  if (arrearsDays + 2 <= 365) {
+    // Single /market_chart call covering the whole gap.
+    try {
+      const prices = await fetchCoinGeckoPrices(`${base}/market_chart?vs_currency=usd&days=${days}`);
+      added.push(...mergeCoinGeckoPrices(prices, map, csvLast));
+    } catch (e) {
+      failures.push(e.message);
+    }
+  } else {
+    // CSV is more than a year stale: cover csvLast + 1 day → now with consecutive ≤360-day
+    // /market_chart/range sub-intervals, merging each response, instead of truncating to 365 days.
+    // Chunks are walked newest-first. The free public API rejects ranges older than 365 days
+    // (HTTP 401), so this order still fills the most recent 360 days on the free tier. After a
+    // 401 every older chunk would fail too, so we stop. The rest is reported in `reason` and
+    // shows up in the coverage banner.
+    const CHUNK_S = 360 * 86400;
+    const startS = Math.floor(new Date(addDaysIso(csvLast, 1)).getTime() / 1000);
+    let toS = Math.floor(Date.now() / 1000);
+    while (toS > startS) {
+      const fromS = Math.max(startS, toS - CHUNK_S);
+      const span = `${new Date(fromS * 1000).toISOString().slice(0, 10)}→${new Date(toS * 1000).toISOString().slice(0, 10)}`;
+      try {
+        const prices = await fetchCoinGeckoPrices(`${base}/market_chart/range?vs_currency=usd&from=${fromS}&to=${toS}`);
+        added.push(...mergeCoinGeckoPrices(prices, map, csvLast));
+      } catch (e) {
+        failures.push(`${span}: ${e.message}`);
+        if (/HTTP 401/.test(e.message)) {
+          if (fromS > startS) failures.push(`older range not requested (free-tier history limit)`);
+          break;
+        }
+      }
+      toS = fromS;
+      if (toS > startS) await new Promise((r) => setTimeout(r, 1500)); // stay under the public rate limit
+    }
+  }
+
+  if (added.length === 0) {
+    return { ok: false, reason: failures.length ? failures.join('; ') : 'CoinGecko returned no new days' };
+  }
+  added.sort();
+  const status = { ok: true, added: added.length, firstPatched: added[0], lastPatched: added[added.length - 1], source: 'coingecko' };
+  if (failures.length) status.reason = failures.join('; ');
+  return status;
+}
+
+/** GET a CoinGecko market_chart(/range) URL and return its [timestamp_ms, price] array. Throws on failure. */
+async function fetchCoinGeckoPrices(url) {
+  let res;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    throw new Error(`network error (${e.message})`);
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
   if (!Array.isArray(json.prices)) throw new Error('no prices in response');
+  return json.prices;
+}
 
-  // Reduce hourly points to one (latest) reading per day ≈ daily close.
+/**
+ * Merge CoinGecko samples into the daily map as closes. Returns the dates added.
+ * CoinGecko's granularity depends on the window: 2–90 days → hourly samples, which we reduce
+ * to the last reading per UTC day; >90 days (or /range over >90 days) → one snapshot per day
+ * at 00:00 UTC, which we take as-is as the daily close. A 00:00 UTC snapshot is the close of the
+ * day that just ended, so each sample is keyed by the UTC date of (timestamp − 1 ms). That matches
+ * the Binance CSV's Close column and leaves hourly samples (never exactly on midnight) on their own day.
+ */
+function mergeCoinGeckoPrices(prices, map, csvLast) {
   const daily = {};
-  for (const [ts, price] of json.prices) daily[isoDate(new Date(ts))] = price;
-
-  let added = 0;
+  for (const [ts, price] of prices) {
+    if (!(price > 0)) continue;
+    daily[new Date(ts - 1).toISOString().slice(0, 10)] = price; // later samples overwrite → last reading wins
+  }
+  const added = [];
   for (const d of Object.keys(daily)) {
-    if (d > csvLast && !(d in map)) { map[d] = daily[d]; added++; } // CSV always wins for covered dates
+    if (d > csvLast && !(d in map)) { map[d] = daily[d]; added.push(d); } // CSV always wins for covered dates
   }
   return added;
 }
 
-/** Exact daily close for a date; tolerates tiny gaps (≤7d) but returns null for out-of-range dates. */
+/**
+ * Daily close for a date as { price, exact }. exact=true is the date's own close. Otherwise it
+ * snaps to the nearest day within 7 days (exact=false). Returns null for out-of-range dates.
+ */
 function priceForDate(target, priceMap) {
   const { map, dates } = priceMap;
-  if (map[target]) return map[target];
+  if (map[target]) return { price: map[target], exact: true };
   const tT = new Date(target).getTime();
   let best = null, bestDiff = Infinity;
   for (const d of dates) {
@@ -704,7 +814,7 @@ function priceForDate(target, priceMap) {
     else if (diff > bestDiff) break;
   }
   // Only accept a neighbour within a week — keeps out-of-range dates from snapping to the CSV start.
-  return best && bestDiff <= 7 * 86400000 ? map[best] : null;
+  return best && bestDiff <= 7 * 86400000 ? { price: map[best], exact: false } : null;
 }
 
 /* ============================================================
@@ -771,6 +881,7 @@ async function runBacktest() {
   // --- Price errors are fatal ---
   if (priceRes.error) return showError(priceRes.error.message);
   const priceMeta = priceRes.ok;
+  renderCoverage(priceMeta.coverage, cfg); // shown every run, even if the risk fetch fails below
   const priceMap = { map: priceMeta.map, dates: priceMeta.dates };
 
   // --- Risk errors: fall back to CSV upload ---
@@ -801,7 +912,11 @@ async function runBacktest() {
     } else {
       console.warn(`[DCA] Backtest date range: ${startStr} to ${endStr} — ${sim.missingDates.length} period(s) skipped (missing price data)`);
     }
+    if (sim.snappedDates.length > 0) {
+      console.warn(`[DCA] ${sim.snappedDates.length} period(s) priced from a neighbouring day (≤7 days away)`);
+    }
     renderResults(sim, assetKey);
+    renderSimNotes(sim);
   } catch (err) {
     showError(err.message || 'Simulation failed.');
   }
@@ -818,13 +933,17 @@ function simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey, ris
   let dynInvested = 0, dynBtc = 0;
   let flatInvested = 0, flatBtc = 0;
 
+  const snappedDates = []; // periods priced from a neighbouring day (priceForDate exact=false)
+
   for (const date of periods) {
-    const price = priceForDate(date, priceMap);
-    if (!price) {
+    const quote = priceForDate(date, priceMap);
+    if (!quote) {
       missingDates.push(date);
       console.warn(`[DCA] No price data for ${date} — skipping this period`);
       continue;
     }
+    const price = quote.price;
+    if (!quote.exact) snappedDates.push(date); // annotate only; the period is still simulated
 
     const risk = riskForDate(date, assetKey, riskData); // STEP 4: daily reading on the trigger date
     if (risk == null) { burnInDates.push(date); continue; } // burn-in: skip, don't invent a risk
@@ -863,7 +982,7 @@ function simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey, ris
     flatReturnPct: flatInvested > 0 ? ((flatFinalValue - flatInvested) / flatInvested) * 100 : 0,
     finalPrice,
   };
-  return { series, totals, missingDates, burnInDates };
+  return { series, totals, missingDates, burnInDates, snappedDates };
 }
 
 /* ============================================================
@@ -885,6 +1004,50 @@ function updateRiskCard(rd) {
 /* ============================================================
    RESULTS RENDERING
    ============================================================ */
+/** Backtest summary line: how many periods were simulated, snapped to a neighbouring day, or skipped. */
+function renderSimNotes({ series, missingDates, burnInDates, snappedDates }) {
+  const parts = [`${series.length} period(s) simulated`];
+  parts.push(snappedDates.length
+    ? `${snappedDates.length} priced from a neighbouring day (≤7 days away, no exact close)`
+    : 'all priced on their exact date');
+  if (missingDates.length) parts.push(`${missingDates.length} skipped (no price within 7 days)`);
+  if (burnInDates.length) parts.push(`${burnInDates.length} skipped (risk burn-in)`);
+  $('simNotes').textContent = parts.join(' · ');
+}
+
+/** Data-coverage banner: CSV range, CoinGecko patch, and any days still without a price. */
+function renderCoverage(cov, cfg) {
+  const p = cov.patch;
+  const patchLine = p.ok
+    ? `${p.firstPatched} → ${p.lastPatched} (added ${p.added} day${p.added === 1 ? '' : 's'})` + (p.reason ? ` · partial: ${p.reason}` : '')
+    : `failed: ${p.reason}`;
+  const runText = (r) => (r.from === r.to ? r.from : `${r.from} → ${r.to}`);
+  const runs = cov.uncoveredRuns;
+  const gapLine = cov.uncoveredDays > 0
+    ? runs.slice(0, 3).map(runText).join(', ') + (runs.length > 3 ? ` +${runs.length - 3} more` : '') +
+      ` (${cov.uncoveredDays} day${cov.uncoveredDays === 1 ? '' : 's'})`
+    : 'none';
+  const rows = [
+    ['CSV range', `${cov.csvFirst} → ${cov.csvLast}`],
+    ['CoinGecko patch', patchLine],
+    ['Uncovered interval', gapLine],
+  ];
+  $('coverageRows').innerHTML = rows.map(([k, v]) =>
+    `<div class="coverage-row"><span>${k}</span><span>${escapeHtml(v)}</span></div>`).join('');
+
+  const warn = cov.uncoveredDays > 0;
+  $('coverageCard').classList.toggle('coverage-warn', warn);
+  $('coverageNote').textContent = warn
+    ? `${cfg.symbol} has no price for ${cov.uncoveredDays} day(s). DCA periods in that interval are skipped ` +
+      '(periods within 7 days of a known price use the nearest day). Replace the bundled CSV with a fresh export to close the gap.'
+    : '';
+  $('coverageCard').style.display = 'block';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function renderResults({ series, totals }, assetKey) {
   const cfg = ASSETS[assetKey];
   showResults();
