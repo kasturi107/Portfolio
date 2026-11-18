@@ -1,9 +1,10 @@
 /* ============================================================
    Dynamic DCA Backtester — Bitcoin & Ethereum
    Pure vanilla JS. Fetches daily price history (bundled CSV +
-   CoinGecko recent gap) and computes a daily on-chain risk score
-   (MVRV Z-Score, normalized to 0–1) from the Coin Metrics free
-   Community API. Simulates a risk-weighted DCA strategy vs a flat
+   CoinGecko recent gap) and computes a daily risk score in [0,1]
+   from the Coin Metrics free Community API via one of two pathways:
+   a look-ahead-free MVRV Z-Score (BTC/ETH) or a power-law price
+   residual (BTC only). Simulates a risk-weighted DCA strategy vs a flat
    DCA baseline and renders summary stats, three Chart.js charts
    and a table. A single asset selector toggles between BTC and ETH;
    each asset's data is fetched once and cached independently.
@@ -48,16 +49,31 @@ const DEFAULT_BANDS = [
   { from: 0.5, to: 1.0, mult: 0 },
 ];
 
-/* ---------- MVRV Z-Score normalization ----------
-   Normalization bounds are computed DYNAMICALLY from the actual fetched z-score
-   series (min/max) inside computeRisk(), rather than hardcoded — see STEP 1. This
-   keeps the [0,1] mapping calibrated to whatever range Coin Metrics returns. */
+/* ---------- Risk pathways ----------
+   Two independent ways to produce R(t) ∈ [0,1]. The selected one drives riskForDate().
+     mvrv     — MVRV Z-Score (on-chain, Coin Metrics), BTC + ETH
+     powerlaw — power-law fair-value residual (price only), BTC only */
+const PATHWAYS = {
+  mvrv:     { label: 'MVRV Z-Score (on-chain, Coin Metrics)', short: 'MVRV Z-Score', assets: ['btc', 'eth'] },
+  powerlaw: { label: 'Power-Law Residual (price, BTC only)',   short: 'Power-Law Residual', assets: ['btc'] },
+};
+
+/* ---------- MVRV pathway constants (spec §1) ----------
+   Pass 2 normalizes each z_t against the running 2nd/98th percentiles of
+   {z_s : s <= t}. No future data enters R_mvrv(t). The first MVRV_BURN_IN_DAYS
+   observations have no risk value, and the backtest skips them. */
+const MVRV_BURN_IN_DAYS = 365;
+const MVRV_Q_LOW  = 0.02;  // q_low_t  = running 2nd percentile
+const MVRV_Q_HIGH = 0.98;  // q_high_t = running 98th percentile
 
 /* ---------- State ---------- */
 let currentAsset = 'btc';              // active asset key ('btc' | 'eth')
+let currentPathway = 'mvrv';           // active risk pathway ('mvrv' | 'powerlaw')
 let userChangedStartDate = false;      // true once the user edits the start date manually
 const priceCache = { btc: null, eth: null }; // { map, dates, … } price meta per asset
-const riskCache  = { btc: null, eth: null }; // computeRisk() output per asset
+const riskCache  = { btc: null, eth: null }; // computeRisk() (MVRV pathway) output per asset
+const plPriceCache = { btc: null };          // Coin Metrics PriceUSD points for the power-law fit
+const plRiskCache = {};                      // computePowerLawRisk() output, keyed by fit mode + cutoff
 const riskCsvData = { btc: null, eth: null }; // fallback: sorted array of { date, risk } per asset
 const useCsvFallback = { btc: false, eth: false }; // true once a fallback CSV is loaded for that asset
 const charts = {};                     // Chart.js instances, so we can destroy on rerun
@@ -71,6 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
   renderBands(DEFAULT_BANDS);
   setupNav();
   setupEvents();
+  updatePathwayControls(currentAsset);
   updateAssetLabels(currentAsset);
   runBacktest();                                     // auto-run for the default asset (BTC)
 });
@@ -94,6 +111,15 @@ function setupEvents() {
   });
   // Track whether the user has manually overridden the start date.
   $('startDate').addEventListener('change', () => { userChangedStartDate = true; });
+  // Risk pathway selector + power-law fit options: re-run with the new selection.
+  $('riskPathway').addEventListener('change', () => {
+    currentPathway = $('riskPathway').value;
+    updatePathwayControls(currentAsset);
+    updateAssetLabels(currentAsset);
+    runBacktest();
+  });
+  $('plFitMode').addEventListener('change', () => { updatePathwayControls(currentAsset); runBacktest(); });
+  $('plCutoff').addEventListener('change', runBacktest);
   // Fallback CSV controls (only visible after an auto-fetch failure)
   $('downloadTemplate').addEventListener('click', downloadTemplate);
   $('csvFile').addEventListener('change', handleCsvUpload);
@@ -110,6 +136,7 @@ function switchAsset(assetKey) {
   console.log('[DCA] Using cached data:', !!priceCache[assetKey]);
 
   updateAssetToggle(assetKey);
+  updatePathwayControls(assetKey); // ETH: power-law disabled, falls back to MVRV
   // Only override the start date if the user hasn't set their own.
   if (!userChangedStartDate) $('startDate').value = ASSETS[assetKey].defaultStartDate;
   updateAssetLabels(assetKey);
@@ -131,9 +158,25 @@ function updateAssetLabels(assetKey) {
   $('introName').textContent = cfg.name;
   $('introSym1').textContent = cfg.symbol;
   $('introSym2').textContent = cfg.symbol;
-  $('riskSource').textContent = `Risk source: MVRV Z-Score (Coin Metrics, normalized 0→1) — ${cfg.name}`;
+  $('riskSource').textContent = currentPathway === 'powerlaw'
+    ? `Risk source: Power-law residual (Coin Metrics price, normalized 0→1) — ${cfg.name}`
+    : `Risk source: MVRV Z-Score (Coin Metrics, causal percentile-normalized 0→1) — ${cfg.name}`;
   $('statBtcLabel').textContent = `${cfg.symbol} Accumulated`;
   $('chartBtcTitle').textContent = `Cumulative ${cfg.symbol} Accumulated`;
+}
+
+/** Enable/disable pathway options for the asset (spec §3) and show power-law fit options. */
+function updatePathwayControls(assetKey) {
+  const sel = $('riskPathway');
+  for (const opt of sel.options) opt.disabled = !PATHWAYS[opt.value].assets.includes(assetKey);
+  if (!PATHWAYS[currentPathway].assets.includes(assetKey)) {
+    currentPathway = 'mvrv';                       // e.g. ETH → power-law unavailable
+    console.log(`[DCA] Power-law pathway unavailable for ${assetKey.toUpperCase()} — using MVRV Z-Score`);
+  }
+  sel.value = currentPathway;
+  const isPl = currentPathway === 'powerlaw';
+  $('plOptions').style.display = isPl ? 'block' : 'none';
+  $('plCutoffField').style.display = isPl && $('plFitMode').value === 'frozen' ? 'block' : 'none';
 }
 
 /* ============================================================
@@ -189,10 +232,17 @@ async function fetchRiskData(assetKey, onProgress) {
   const today = isoDate(new Date());
   // CapMVRVCur (market cap ÷ realized cap) is available on the free Community tier;
   // the raw realized cap (CapRealUSD) is Pro-only, so we use the ready-made ratio.
-  let url = `https://community-api.coinmetrics.io/v4/timeseries/asset-metrics` +
+  const url = `https://community-api.coinmetrics.io/v4/timeseries/asset-metrics` +
     `?assets=${cfg.coinmetricsAsset}&metrics=CapMVRVCur&frequency=1d` +
     `&start_time=2012-01-01&end_time=${today}&page_size=10000`;
 
+  const rows = await fetchCoinMetricsRows(url, (n) => onProgress && onProgress(`Computing risk scores… (${n} days)`));
+  riskCache[assetKey] = computeRisk(rows, assetKey);
+  return riskCache[assetKey];
+}
+
+/** GET a Coin Metrics timeseries, following pagination. Throws on HTTP error or empty result. */
+async function fetchCoinMetricsRows(url, onPage) {
   const rows = [];
   let page = 0;
   while (url && page < 20) {
@@ -202,20 +252,17 @@ async function fetchRiskData(assetKey, onProgress) {
     if (Array.isArray(json.data)) rows.push(...json.data);
     url = json.next_page_url || null; // follow pagination if present
     page++;
-    onProgress && onProgress(`Computing risk scores… (${rows.length} days)`);
+    onPage && onPage(rows.length);
   }
-
   if (rows.length === 0) throw new Error('Coin Metrics returned no data.');
-  riskCache[assetKey] = computeRisk(rows, assetKey);
-  return riskCache[assetKey];
+  return rows;
 }
 
 /**
- * Compute the normalized MVRV Z-Score risk series using an expanding window.
- * Pass 1: for each day i (chronological), use all data from day 0..i to derive
- * the running mean & population std of MVRV, then the z-score. Pass 2: normalize
- * each z-score to [0,1] using the ACTUAL historical min/max of the z-score series
- * (calibrated to the data Coin Metrics returns, not hardcoded bounds).
+ * MVRV pathway: compute R_mvrv(t) ∈ [0,1] with no look-ahead.
+ * Pass 1: expanding-window z-score of CapMVRVCur (mean & sample std over days 0..t).
+ * Pass 2: robust causal normalization against the running 2nd/98th percentiles of
+ * the z-scores seen so far, with a MVRV_BURN_IN_DAYS burn-in where R is undefined.
  */
 function computeRisk(rows, assetKey) {
   const cfg = ASSETS[assetKey];
@@ -238,24 +285,32 @@ function computeRisk(rows, assetKey) {
     sumSq += p.mvrv * p.mvrv;
     n++;
     const mean = sum / n;
-    const variance = Math.max(0, sumSq / n - mean * mean); // population variance
+    // Spec §1: sample variance s² = (Σx² − n·mean²) / (n − 1). Has less small-n bias in 2011–13.
+    const variance = n > 1 ? Math.max(0, (sumSq - n * mean * mean) / (n - 1)) : 0;
     const std = Math.sqrt(variance);
-    const z = std > 0 ? (p.mvrv - mean) / std : 0;
+    const z = std > 0 ? (p.mvrv - mean) / std : 0;  // z_t = (MVRV_t − mean_t) / s_t
     zMap[p.date] = z;
     mvrvMap[p.date] = p.mvrv;
     zScores.push(z);
   }
+  const zMean = zScores.length ? zScores.reduce((a, b) => a + b, 0) / zScores.length : 0; // debug only
 
-  // --- Dynamic normalization bounds from the actual data (STEP 1) ---
-  const zMin = zScores.length ? Math.min(...zScores) : 0;
-  const zMax = zScores.length ? Math.max(...zScores) : 1;
-  const zMean = zScores.length ? zScores.reduce((a, b) => a + b, 0) / zScores.length : 0;
-  const span = zMax - zMin;
-
-  // --- Pass 2: normalize to [0,1] ---
-  const map = {};
-  for (const p of pts) {
-    map[p.date] = span > 0 ? clamp((zMap[p.date] - zMin) / span, 0, 1) : 0;
+  // --- Pass 2: causal robust normalization (spec §1) ---
+  // R_mvrv(t) = clamp((z_t − q_low_t) / (q_high_t − q_low_t), 0, 1), where q_low_t and q_high_t
+  // are the 2nd/98th percentiles of {z_s : s ≤ t}. A sorted running array keeps this causal.
+  const sortedZ = [];
+  const map = {}, qLowMap = {}, qHighMap = {};
+  for (let i = 0; i < pts.length; i++) {
+    const d = pts[i].date;
+    const z = zMap[d];
+    insertSorted(sortedZ, z);                         // sortedZ = {z_s : s ≤ t}
+    if (i < MVRV_BURN_IN_DAYS) continue;              // burn-in: R_mvrv(t) undefined, no entry
+    const qLow  = quantileSorted(sortedZ, MVRV_Q_LOW);  // q_low_t
+    const qHigh = quantileSorted(sortedZ, MVRV_Q_HIGH); // q_high_t
+    const span = qHigh - qLow;
+    map[d] = span > 0 ? clamp((z - qLow) / span, 0, 1) : 0;
+    qLowMap[d] = qLow;
+    qHighMap[d] = qHigh;
   }
 
   const dates = Object.keys(map).sort();
@@ -266,55 +321,255 @@ function computeRisk(rows, assetKey) {
     console.log(`=== ${cfg.symbol} MVRV Z-Score Debug ===`);
     console.log('Raw MVRV ratio today:', mvrvMap[lastDate]);
     console.log('Raw Z-Score today:', zMap[lastDate]);
-    console.log('Historical Z-Score min:', zMin);
-    console.log('Historical Z-Score max:', zMax);
+    console.log(`Running Z-Score q${MVRV_Q_LOW * 100} today:`, qLowMap[lastDate]);
+    console.log(`Running Z-Score q${MVRV_Q_HIGH * 100} today:`, qHighMap[lastDate]);
     console.log('Historical Z-Score mean:', zMean);
+    console.log(`Burn-in: first ${MVRV_BURN_IN_DAYS} days skipped; risk defined from`, dates[0]);
     console.log('Normalized risk today [0–1]:', map[lastDate]);
     console.log('=========================');
 
-    // Spot checks for known reference dates (forward-filled from nearest prior day).
+    // Spot checks for known reference dates (forward-filled from nearest prior day; null = in burn-in).
     for (const d of cfg.spotChecks) {
-      const z = forwardFill(zMap, dates, d);
-      const r = forwardFill(map, dates, d);
+      const z = forwardFill(zMap, Object.keys(zMap), d);
+      const r = d < dates[0] ? null : forwardFill(map, dates, d);
       console.log(`Spot check ${d}: Z-Score =`, z, '| Risk =', r);
     }
   }
 
   return {
-    map, dates, zMap, mvrvMap,
-    zMin, zMax, zMean,
+    pathway: 'mvrv',
+    map, dates, zMap, mvrvMap, qLowMap, qHighMap,
+    zMean,
     count: dates.length,
     firstDate: dates[0],
     lastDate,
     todayRisk: dates.length ? map[lastDate] : null,
     todayZ: dates.length ? zMap[lastDate] : null,
     todayMvrv: dates.length ? mvrvMap[lastDate] : null,
+    rawLabel: dates.length ? `raw MVRV Z-Score: ${zMap[lastDate].toFixed(2)}` : '',
+  };
+}
+
+/** Insert v into an ascending array in place (binary search + splice). */
+function insertSorted(arr, v) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] <= v) lo = mid + 1; else hi = mid;
+  }
+  arr.splice(lo, 0, v);
+}
+
+/** p-quantile of an ascending array with linear interpolation (the usual "type 7" definition). */
+function quantileSorted(arr, p) {
+  if (arr.length === 0) return NaN;
+  const h = (arr.length - 1) * p;
+  const lo = Math.floor(h), hi = Math.ceil(h);
+  return arr[lo] + (h - lo) * (arr[hi] - arr[lo]);
+}
+
+/* ============================================================
+   POWER-LAW RESIDUAL PATHWAY (spec §2) — BTC only, price only
+   Inspired by public descriptions of power-law risk models such as
+   panpanXBT's TradingView "BTC Risk Metric". That script is closed-source,
+   so this is a reimplementation, not a bit-for-bit reproduction.
+   ============================================================ */
+const BTC_GENESIS_UTC = Date.UTC(2009, 0, 3); // 2009-01-03, Bitcoin genesis block
+const PL_BURN_IN_DAYS = 365;  // minimum observations before the regression is used
+const PL_PRICE_START  = '2010-07-18'; // first Coin Metrics PriceUSD day for BTC
+
+// Diminishing-returns envelope A(τ) = C · τ^(−α) (spec §2), calibrated ONCE by
+// calibratePowerLawEnvelope() on Coin Metrics BTC PriceUSD 2010-07-18 → 2026-11-17,
+// using the expanding-window fit. These are fixed constants, so the calibration
+// itself uses the full history. Re-run calibratePowerLawEnvelope() in the console to check them.
+// Result: 15 yearly blocks; percentiles of ε/A are q02 ≈ −0.97 and q98 ≈ +1.03.
+const PL_ENVELOPE_C     = 237.53; // C (natural-log price units · days^α)
+const PL_ENVELOPE_ALPHA = 0.6531; // α (envelope decay exponent)
+
+/** τ_t = days since 2009-01-03 (spec §2). */
+function daysSinceGenesis(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return (Date.UTC(y, m - 1, d) - BTC_GENESIS_UTC) / 86400000;
+}
+
+/** Fetch (once per session) the daily BTC PriceUSD history used by the power-law fit. */
+async function fetchPowerLawPrices(assetKey, onProgress) {
+  if (plPriceCache[assetKey]) return plPriceCache[assetKey];
+  const cfg = ASSETS[assetKey];
+  onProgress && onProgress('Fetching price history for power-law fit…');
+  // The bundled Binance CSV only starts in 2017, too late for a power-law fit,
+  // so the fit uses Coin Metrics PriceUSD, which goes back to 2010.
+  const url = `https://community-api.coinmetrics.io/v4/timeseries/asset-metrics` +
+    `?assets=${cfg.coinmetricsAsset}&metrics=PriceUSD&frequency=1d` +
+    `&start_time=${PL_PRICE_START}&end_time=${isoDate(new Date())}&page_size=10000`;
+  const rows = await fetchCoinMetricsRows(url, (n) => onProgress && onProgress(`Computing power-law risk… (${n} days)`));
+  const pts = [];
+  for (const r of rows) {
+    const price = parseFloat(r.PriceUSD);
+    if (!r.time || isNaN(price) || price <= 0) continue;
+    pts.push({ date: r.time.slice(0, 10), price });
+  }
+  pts.sort((a, b) => a.date.localeCompare(b.date));
+  plPriceCache[assetKey] = pts;
+  return pts;
+}
+
+/** Power-law risk for the given fit options, cached per (asset, mode, cutoff). */
+async function fetchPowerLawRisk(assetKey, opts, onProgress) {
+  if (!PATHWAYS.powerlaw.assets.includes(assetKey)) throw new Error('The power-law pathway is only available for BTC.');
+  const key = `${assetKey}|${opts.mode}|${opts.mode === 'frozen' ? opts.cutoff : ''}`;
+  if (plRiskCache[key]) return plRiskCache[key];
+  const pts = await fetchPowerLawPrices(assetKey, onProgress);
+  plRiskCache[key] = computePowerLawRisk(pts, assetKey, opts);
+  return plRiskCache[key];
+}
+
+/**
+ * Regression residuals, causal by construction (spec §2).
+ *   log P_t ~ a_t + b_t · log τ_t, refit daily by OLS on {s ≤ t} (expanding), or on
+ *   {s ≤ cutoff} for t > cutoff when opts.mode === 'frozen'.
+ *   ε_t = log P_t − (a_t + b_t · log τ_t)
+ * Natural logs throughout. Returns one row per day after the PL_BURN_IN_DAYS burn-in.
+ */
+function powerLawResiduals(pts, opts) {
+  const frozen = opts.mode === 'frozen';
+  const out = [];
+  let n = 0, Sx = 0, Sy = 0, Sxx = 0, Sxy = 0; // running OLS sums
+  for (const p of pts) {
+    const tau = daysSinceGenesis(p.date);       // τ_t
+    if (tau <= 0) continue;
+    const x = Math.log(tau), y = Math.log(p.price);
+    if (!frozen || p.date <= opts.cutoff) {     // frozen: stop adding points after the cutoff
+      n++; Sx += x; Sy += y; Sxx += x * x; Sxy += x * y;
+    }
+    if (n < PL_BURN_IN_DAYS) continue;
+    const den = n * Sxx - Sx * Sx;
+    if (den <= 0) continue;
+    const b = (n * Sxy - Sx * Sy) / den;        // b_t (OLS slope)
+    const a = (Sy - b * Sx) / n;                // a_t (OLS intercept)
+    const eps = y - (a + b * x);                // ε_t
+    out.push({ date: p.date, tau, price: p.price, a, b, eps });
+  }
+  return out;
+}
+
+/** Envelope A(τ_t) = C · τ_t^(−α) (spec §2). */
+function powerLawEnvelope(tau, C = PL_ENVELOPE_C, alpha = PL_ENVELOPE_ALPHA) {
+  return C * Math.pow(tau, -alpha);
+}
+
+/**
+ * One-off calibration of (C, α); the results are hard-coded in PL_ENVELOPE_*.
+ *  1. α: split the residual history into consecutive 365-day blocks. For each block take
+ *     the half-width h_k = (q98 − q02)/2 of ε. Fit ln h_k = ln C₀ − α · ln τ_k by OLS.
+ *  2. C: with α fixed, let v = ε · τ^α. Choose u = 1/C to minimize the least-squares loss
+ *     (u·q02(v) + 1)² + (u·q98(v) − 1)², so the 2nd/98th percentiles of ε/A land near −1/+1.
+ *     Closed form: u = (q98 − q02) / (q02² + q98²).
+ * Callable from the console: calibratePowerLawEnvelope(plPriceCache.btc).
+ */
+function calibratePowerLawEnvelope(pts, opts = { mode: 'expanding' }) {
+  const res = powerLawResiduals(pts, opts);
+  const xs = [], ys = [];
+  for (let i = 0; i + 365 <= res.length; i += 365) {
+    const block = res.slice(i, i + 365);
+    const e = block.map((r) => r.eps).sort((p, q) => p - q);
+    const h = (quantileSorted(e, 0.98) - quantileSorted(e, 0.02)) / 2;
+    xs.push(Math.log(block[182].tau));
+    ys.push(Math.log(h));
+  }
+  const m = xs.length;
+  const mx = xs.reduce((s, v) => s + v, 0) / m, my = ys.reduce((s, v) => s + v, 0) / m;
+  let sxy = 0, sxx = 0;
+  for (let i = 0; i < m; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) ** 2; }
+  const alpha = -sxy / sxx;
+  const v = res.map((r) => r.eps * Math.pow(r.tau, alpha)).sort((p, q) => p - q);
+  const q02 = quantileSorted(v, 0.02), q98 = quantileSorted(v, 0.98);
+  const C = (q02 * q02 + q98 * q98) / (q98 - q02);
+  const scaled = v.map((x) => x / C);
+  return { C, alpha, blocks: m, q02Scaled: quantileSorted(scaled, 0.02), q98Scaled: quantileSorted(scaled, 0.98) };
+}
+
+/** R_pl(t) = clamp(0.5 + 0.5 · ε_t / A(τ_t), 0, 1) (spec §2): ε=0 → 0.5, ε=±A → 1/0. */
+function computePowerLawRisk(pts, assetKey, opts) {
+  const cfg = ASSETS[assetKey];
+  const res = powerLawResiduals(pts, opts);
+  if (res.length === 0) {
+    const err = new Error(opts.mode === 'frozen'
+      ? `Power-law cutoff ${opts.cutoff} is too early: the fit needs ${PL_BURN_IN_DAYS} days of data from ${PL_PRICE_START}.`
+      : 'Not enough price history for the power-law fit.');
+    err.isConfig = true; // a settings problem, not a fetch failure: don't offer the CSV fallback
+    throw err;
+  }
+  const map = {}, rowMap = {};
+  for (const r of res) {
+    r.A = powerLawEnvelope(r.tau);                       // A(τ_t)
+    r.risk = clamp(0.5 + 0.5 * r.eps / r.A, 0, 1);       // R_pl(t)
+    map[r.date] = r.risk;
+    rowMap[r.date] = r;
+  }
+  const dates = res.map((r) => r.date);
+  const lastDate = dates[dates.length - 1];
+  const last = rowMap[lastDate];
+
+  // --- Spec §5: power-law debug output (mirrors the MVRV block) ---
+  console.log(`=== ${cfg.symbol} Power-Law Residual Debug (${opts.mode}${opts.mode === 'frozen' ? ' @ ' + opts.cutoff : ''}) ===`);
+  console.log('Envelope constants: C =', PL_ENVELOPE_C, '| alpha =', PL_ENVELOPE_ALPHA);
+  console.log('Date:', lastDate, '| price:', last.price, '| tau (days):', last.tau);
+  console.log('a_t:', last.a);
+  console.log('b_t:', last.b);
+  console.log('eps_t:', last.eps);
+  console.log('A(tau_t):', last.A);
+  console.log('R_pl(t) [0–1]:', last.risk);
+  console.log(`Burn-in: first ${PL_BURN_IN_DAYS} days skipped; risk defined from`, dates[0]);
+  console.log('=========================');
+  for (const d of cfg.spotChecks) {
+    if (d < dates[0]) { console.log(`Spot check ${d}: in burn-in (no risk)`); continue; }
+    const r = rowMap[dates[forwardFillIndex(dates, d)]];
+    console.log(`Spot check ${d}: a_t =`, r.a, '| b_t =', r.b, '| eps_t =', r.eps, '| A =', r.A, '| R_pl =', r.risk);
+  }
+
+  return {
+    pathway: 'powerlaw',
+    map, dates, rowMap,
+    count: dates.length,
+    firstDate: dates[0],
+    lastDate,
+    todayRisk: last.risk,
+    rawLabel: `power-law residual ε: ${last.eps.toFixed(3)} (envelope A: ${last.A.toFixed(3)})`,
   };
 }
 
 /* ============================================================
    RISK LOOKUP (STEP 3 — forward-fill from nearest prior date)
    ============================================================ */
-function riskForDate(dateStr, assetKey) {
+/**
+ * Risk for a DCA date from the selected pathway's output `rd` (MVRV or power-law).
+ * Returns null before the pathway's first defined date (burn-in); simulate() skips those periods.
+ */
+function riskForDate(dateStr, assetKey, rd) {
   if (useCsvFallback[assetKey] && riskCsvData[assetKey] && riskCsvData[assetKey].length) {
     return forwardFillArr(riskCsvData[assetKey], dateStr);
   }
-  const rd = riskCache[assetKey];
   if (!rd) return 0;
+  if (rd.dates.length === 0 || dateStr < rd.dates[0]) return null; // burn-in: no risk value
   return forwardFill(rd.map, rd.dates, dateStr);
 }
 
 /** Largest date <= target via binary search; clamps to first entry if target precedes all. */
 function forwardFill(map, dates, target) {
   if (dates.length === 0) return 0;
-  if (target < dates[0]) return map[dates[0]];
+  return map[dates[forwardFillIndex(dates, target)]];
+}
+
+/** Index of the largest date <= target (0 if target precedes all). */
+function forwardFillIndex(dates, target) {
   let lo = 0, hi = dates.length - 1, ans = 0;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
     if (dates[mid] <= target) { ans = mid; lo = mid + 1; }
     else hi = mid - 1;
   }
-  return map[dates[ans]];
+  return ans;
 }
 
 /** Forward-fill over the sorted CSV array [{date,risk}]. */
@@ -488,6 +743,13 @@ async function runBacktest() {
   if (isNaN(base) || base <= 0) return showError('Base investment must be a positive number.');
   if (bands.length === 0) return showError('Add at least one risk band.');
 
+  // --- Risk pathway selection (spec §3) ---
+  const pathway = PATHWAYS[currentPathway].assets.includes(assetKey) ? currentPathway : 'mvrv';
+  const plOpts = { mode: $('plFitMode').value, cutoff: $('plCutoff').value };
+  if (pathway === 'powerlaw' && plOpts.mode === 'frozen' && !plOpts.cutoff) {
+    return showError('Choose a cutoff date for the frozen power-law fit.');
+  }
+
   // --- Combined progress indicator ---
   const prog = { price: `Loading ${cfg.symbol} price data (history)…`, risk: 'Computing risk scores…' };
   const paint = () => { $('loaderText').innerHTML = `${prog.price}<br>${prog.risk}`; };
@@ -500,7 +762,9 @@ async function runBacktest() {
       .then((p) => ({ ok: p })).catch((e) => ({ error: e })),
     (useCsvFallback[assetKey]
       ? Promise.resolve({ ok: null })  // already have a fallback CSV; skip the auto-fetch
-      : fetchRiskData(assetKey, (msg) => { prog.risk = msg; paint(); })
+      : (pathway === 'powerlaw'
+          ? fetchPowerLawRisk(assetKey, plOpts, (msg) => { prog.risk = msg; paint(); })
+          : fetchRiskData(assetKey, (msg) => { prog.risk = msg; paint(); }))
           .then((r) => ({ ok: r })).catch((e) => ({ error: e }))),
   ]);
 
@@ -511,22 +775,27 @@ async function runBacktest() {
 
   // --- Risk errors: fall back to CSV upload ---
   if (riskRes.error) {
+    if (riskRes.error.isConfig) return showError(riskRes.error.message);
     revealCsvFallback();
     return showError('Could not fetch risk data automatically. ' + riskRes.error.message +
       ' Upload a risk CSV in the fallback panel on the left, then re-run.');
   }
 
   // --- Console diagnostics ---
+  const riskData = riskRes.ok; // selected pathway's output (null when the CSV fallback is in use)
   if (useCsvFallback[assetKey] && riskCsvData[assetKey]) {
     console.log(`[DCA] Risk data loaded: ${riskCsvData[assetKey].length} days (manual CSV fallback)`);
   } else {
-    console.log(`[DCA] Risk data loaded: ${riskCache[assetKey].count} days (${cfg.symbol} MVRV Z-Score)`);
-    updateRiskCard(assetKey);
+    console.log(`[DCA] Risk data loaded: ${riskData.count} days (${cfg.symbol} ${PATHWAYS[pathway].short}, from ${riskData.firstDate})`);
+    updateRiskCard(riskData);
   }
 
   // --- Simulate & render ---
   try {
-    const sim = simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey });
+    const sim = simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey, riskData });
+    if (sim.burnInDates.length > 0) {
+      console.warn(`[DCA] ${sim.burnInDates.length} period(s) before ${riskData.firstDate} skipped (risk burn-in, no risk value)`);
+    }
     if (sim.missingDates.length === 0) {
       console.log(`[DCA] Backtest date range: ${startStr} to ${endStr} — all dates have price + risk data ✓`);
     } else {
@@ -541,10 +810,11 @@ async function runBacktest() {
 /* ============================================================
    BACKTEST ENGINE
    ============================================================ */
-function simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey }) {
+function simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey, riskData }) {
   const periods = generatePeriods(startStr, endStr, freq);
   const series = [];
   const missingDates = [];
+  const burnInDates = []; // periods before the pathway's first risk value
   let dynInvested = 0, dynBtc = 0;
   let flatInvested = 0, flatBtc = 0;
 
@@ -556,7 +826,8 @@ function simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey }) {
       continue;
     }
 
-    const risk = riskForDate(date, assetKey);    // STEP 4: daily reading on the trigger date
+    const risk = riskForDate(date, assetKey, riskData); // STEP 4: daily reading on the trigger date
+    if (risk == null) { burnInDates.push(date); continue; } // burn-in: skip, don't invent a risk
     const mult = multiplierForRisk(risk, bands);
 
     const dynAmount = base * mult;
@@ -573,7 +844,11 @@ function simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey }) {
     });
   }
 
-  if (series.length === 0) throw new Error('No DCA periods produced any data — try a wider date range.');
+  if (series.length === 0) {
+    throw new Error(burnInDates.length
+      ? `All periods fall inside the risk burn-in window (risk starts ${riskData.firstDate}) — choose a later start date.`
+      : 'No DCA periods produced any data — try a wider date range.');
+  }
 
   const finalPrice = series[series.length - 1].price;
   const dynFinalValue = dynBtc * finalPrice;
@@ -588,14 +863,13 @@ function simulate({ startStr, endStr, base, freq, bands, priceMap, assetKey }) {
     flatReturnPct: flatInvested > 0 ? ((flatFinalValue - flatInvested) / flatInvested) * 100 : 0,
     finalPrice,
   };
-  return { series, totals, missingDates };
+  return { series, totals, missingDates, burnInDates };
 }
 
 /* ============================================================
    RISK INFO CARD (STEP 6)
    ============================================================ */
-function updateRiskCard(assetKey) {
-  const rd = riskCache[assetKey];
+function updateRiskCard(rd) {
   if (!rd || rd.todayRisk == null) return;
   const r = rd.todayRisk;
   const el = $('riskTodayValue');
@@ -603,10 +877,8 @@ function updateRiskCard(assetKey) {
   el.style.color = riskColor(r, 1);
   $('riskBarMarker').style.left = (r * 100) + '%';
   $('riskTodayDate').textContent = `as of ${rd.lastDate}`;
-  // STEP 3: show the raw MVRV Z-Score so it can be cross-checked externally.
-  if (rd.todayZ != null) {
-    $('riskTodayRaw').textContent = `raw MVRV Z-Score: ${rd.todayZ.toFixed(2)}`;
-  }
+  // STEP 3: show the pathway's raw input (MVRV Z-Score or power-law residual) for external cross-checks.
+  $('riskTodayRaw').textContent = rd.rawLabel || '';
   $('riskInfoCard').style.display = 'block';
 }
 

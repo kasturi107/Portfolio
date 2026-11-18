@@ -308,13 +308,13 @@
         <p>
           Simulate a risk-weighted <span id="introName">Bitcoin</span> dollar-cost-averaging strategy: invest
           <em>more</em> when <span id="introSym1">BTC</span> risk is low and <em>less</em> (or nothing) when risk is high.
-          Risk is a 0–1 metric approximating Benjamin Cowen's <span id="introSym2">BTC</span> Risk framework, computed
-          automatically from on-chain data (MVRV Z-Score via Coin Metrics). Historical prices
+          Risk is a 0–1 <span id="introSym2">BTC</span> metric computed automatically, either from on-chain data
+          (MVRV Z-Score via Coin Metrics) or, for BTC, from a power-law price model. Historical prices
           come from a bundled historical dataset — no API keys, no manual input.
         </p>
         <p class="hint" style="margin-top:0.7rem;">
           Price data: Binance daily close (CryptoDataDownload) + CoinGecko for recent 60 days
-          &nbsp;·&nbsp; Risk: MVRV Z-Score (Coin Metrics)
+          &nbsp;·&nbsp; Risk: MVRV Z-Score or BTC power-law residual (Coin Metrics)
         </p>
       </div>
 
@@ -332,6 +332,30 @@
             <div class="asset-toggle" id="assetToggle">
               <button type="button" class="asset-btn active" data-asset="btc">Bitcoin (BTC)</button>
               <button type="button" class="asset-btn" data-asset="eth">Ethereum (ETH)</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="riskPathway">Risk metric</label>
+            <select id="riskPathway">
+              <option value="mvrv" selected>MVRV Z-Score (on-chain, Coin Metrics)</option>
+              <option value="powerlaw">Power-Law Residual (price, BTC only)</option>
+            </select>
+          </div>
+
+          <div id="plOptions" style="display:none;">
+            <div class="field-row">
+              <div class="field">
+                <label for="plFitMode">Power-law fit</label>
+                <select id="plFitMode">
+                  <option value="expanding" selected>Expanding (daily refit)</option>
+                  <option value="frozen">Frozen after cutoff</option>
+                </select>
+              </div>
+              <div class="field" id="plCutoffField" style="display:none;">
+                <label for="plCutoff">Fit cutoff</label>
+                <input type="date" id="plCutoff" value="2020-12-31" />
+              </div>
             </div>
           </div>
 
@@ -371,9 +395,21 @@
           <button class="btn-ghost" id="addBandBtn">+ Add band</button>
 
           <p class="hint" style="margin-top:1.4rem;">
-            Risk is computed automatically from on-chain data (MVRV Z-Score via the
-            Coin Metrics Community API) — no manual input needed. Each DCA period
-            reads the daily risk value on its own investment date.
+            <strong>MVRV Z-Score</strong>: how far market cap sits above realized cap
+            (Coin Metrics Community API). It is measured in standard deviations of its
+            own history, then scaled 0–1 against the 2nd–98th percentile range of past values.
+            <strong>Power-Law Residual</strong>: how far the BTC price sits above or below
+            a log-log regression of price on days since the genesis block, scaled by an
+            envelope that narrows over time.
+          </p>
+          <p class="hint">
+            The power-law metric is a reimplementation inspired by public descriptions of
+            power-law risk models (e.g. panpanXBT's TradingView BTC Risk Metric). That
+            script is closed-source, so this is <em>not</em> a bit-for-bit reproduction.
+            The MVRV metric now uses only data available on each date (no look-ahead).
+            Its first 365 days are a burn-in with no risk value, and backtest periods inside
+            the burn-in are skipped. Each DCA period reads the daily risk value on its own
+            investment date.
           </p>
 
           <button class="btn-primary run-btn" id="runBtn">Run Backtest</button>
@@ -392,9 +428,10 @@
           <p class="risk-today-date" id="riskTodayDate"></p>
           <p class="risk-today-date" id="riskTodayRaw"></p>
           <p class="hint" style="margin-top:0.6rem;">
-            This approximates Cowen's ITC risk metric using publicly available on-chain
-            data. Results will differ from ITC Premium.
-            Reference: <a href="https://intothecryptoverse.com/" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">Into The Cryptoverse</a>.
+            Built from public data. It does not reproduce any proprietary risk metric
+            (e.g. ITC Premium or panpanXBT's closed-source script), and its values will differ.
+            References: <a href="https://intothecryptoverse.com/" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">Into The Cryptoverse</a>,
+            <a href="https://www.tradingview.com/script/MyMoj4Pg-panpanXBT-BTC-Risk-Metric/" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">panpanXBT BTC Risk Metric</a>.
           </p>
         </div>
 
